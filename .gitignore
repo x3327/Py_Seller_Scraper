@@ -26,6 +26,12 @@ Thumbs.db
 .idea/
 *.swp
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.zip
+
 # Claude Code internals
 .claude/
 brain/

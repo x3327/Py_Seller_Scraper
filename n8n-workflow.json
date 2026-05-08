@@ -27,7 +27,7 @@
 
     {
       "parameters": {
-        "jsCode": "const msg = $input.first().json.message;\nconst text = (msg?.text || '').trim();\nconst chatId = String(msg?.chat?.id || '');\nconst staticData = $getWorkflowStaticData('global');\n\nlet intent = 'help';\nlet categoryQuery = '';\nlet marketplace = 'ES';\n\nif (/collect\\s*asin|scrape\\s*asin|get\\s*asin|start\\s*asin|find\\s*asin/i.test(text)) {\n  intent = 'collect_asins';\n  categoryQuery = text\n    .replace(/collect\\s*asins?|scrape\\s*asins?|get\\s*asins?|start\\s*asin\\s*collection|find\\s*asins?/gi, '')\n    .replace(/\\bfrom\\b|\\bof\\b|\\bfor\\b|\\bin\\b/gi, '')\n    .replace(/\\b(ES|UK|DE|FR|IT)\\b/gi, '')\n    .replace(/[>]/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n} else if (/scrape\\s*seller|seller\\s*data|seller\\s*info|start\\s*seller|seller\\s*scrap/i.test(text)) {\n  intent = 'scrape_sellers';\n} else if (/status|progress/i.test(text)) {\n  intent = 'status';\n}\n\nconst mpMatch = text.match(/\\b(ES|UK|DE|FR|IT)\\b/i);\nif (mpMatch) marketplace = mpMatch[1].toUpperCase();\n\nconst session = staticData[chatId] || {};\n\nreturn [{ json: { intent, categoryQuery, marketplace, chatId, originalText: text, session } }];"
+        "jsCode": "const msg = $input.first().json.message;\nconst text = (msg?.text || '').trim();\nconst chatId = String(msg?.chat?.id || '');\nconst staticData = $getWorkflowStaticData('global');\n\nlet intent = 'help';\nlet categoryQuery = '';\nlet marketplace = 'ES';\nlet maxItems = 200; // default\n\nif (/collect\\s*asin|scrape\\s*asin|get\\s*asin|start\\s*asin|find\\s*asin/i.test(text)) {\n  intent = 'collect_asins';\n\n  // Extract maxItems: number like 500, or 'unlimited' / 'all'\n  const unlimitedMatch = /\\b(unlimited|all|no.?limit)\\b/i.test(text);\n  const numMatch = text.match(/\\b(\\d{2,5})\\b/);\n  if (unlimitedMatch) {\n    maxItems = 0; // 0 = unlimited\n  } else if (numMatch) {\n    maxItems = parseInt(numMatch[1]);\n  }\n\n  categoryQuery = text\n    .replace(/collect\\s*asins?|scrape\\s*asins?|get\\s*asins?|start\\s*asin\\s*collection|find\\s*asins?/gi, '')\n    .replace(/\\bfrom\\b|\\bof\\b|\\bfor\\b|\\bin\\b/gi, '')\n    .replace(/\\b(ES|UK|DE|FR|IT)\\b/gi, '')\n    .replace(/\\b(unlimited|all|no.?limit)\\b/gi, '')\n    .replace(/\\b\\d{2,5}\\b/g, '')\n    .replace(/[>]/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n} else if (/scrape\\s*seller|seller\\s*data|seller\\s*info|start\\s*seller|seller\\s*scrap/i.test(text)) {\n  intent = 'scrape_sellers';\n} else if (/status|progress/i.test(text)) {\n  intent = 'status';\n}\n\nconst mpMatch = text.match(/\\b(ES|UK|DE|FR|IT)\\b/i);\nif (mpMatch) marketplace = mpMatch[1].toUpperCase();\n\nconst session = staticData[chatId] || {};\n\nreturn [{ json: { intent, categoryQuery, marketplace, maxItems, chatId, originalText: text, session } }];"
       },
       "id": "node-02",
       "name": "Parse Message",
@@ -121,7 +121,7 @@
 
     {
       "parameters": {
-        "jsCode": "// Parse CSV from Google Sheets and filter by query\nconst resp = $('Fetch Browse Nodes').item.json;\nlet csvText = '';\nif (typeof resp === 'string') {\n  csvText = resp;\n} else if (typeof resp.data === 'string') {\n  csvText = resp.data;\n} else if (typeof resp.body === 'string') {\n  csvText = resp.body;\n} else {\n  csvText = JSON.stringify(resp);\n}\n\nconst query = ($('Parse Message').item.json.categoryQuery || '').toLowerCase().trim();\nconst marketplace = $('Parse Message').item.json.marketplace || 'ES';\nconst chatId = $('Parse Message').item.json.chatId;\n\nif (!csvText || !query) {\n  return [{ json: { matched: [], query, marketplace, chatId, count: 0, error: query ? 'No CSV data' : 'Empty query' } }];\n}\n\nconst lines = csvText.replace(/\\r/g, '').split('\\n').filter(l => l.trim());\nconst allNodes = [];\nconst seen = new Set();\n\nfor (let i = 1; i < lines.length; i++) {\n  const cols = [];\n  let cur = '', inQ = false;\n  for (const ch of lines[i]) {\n    if (ch === '\"') { inQ = !inQ; }\n    else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ''; }\n    else { cur += ch; }\n  }\n  cols.push(cur.trim());\n\n  const esId = (cols[1] || '').trim();\n  const englishPath = (cols[5] || '').trim();\n  if (!esId || !englishPath || seen.has(esId)) continue;\n  seen.add(esId);\n\n  const parts = englishPath.split(' > ').filter(Boolean);\n  allNodes.push({\n    id: esId,\n    name: parts[parts.length - 1] || englishPath,\n    path: englishPath,\n    nodes: {\n      ES: esId || null,\n      UK: (cols[6] || '').trim() || null,\n      DE: (cols[7] || '').trim() || null,\n      FR: (cols[8] || '').trim() || null,\n      IT: (cols[9] || '').trim() || null\n    }\n  });\n}\n\nconst queryParts = query.split(/\\s+/).filter(Boolean);\nconst scored = allNodes\n  .filter(n => n.nodes && n.nodes[marketplace])\n  .map(n => {\n    const pl = (n.path || '').toLowerCase();\n    const nl = (n.name || '').toLowerCase();\n    let score = 0;\n    for (const p of queryParts) {\n      if (nl.includes(p)) score += 3;\n      if (pl.includes(p)) score += 1;\n    }\n    return { node: n, score };\n  })\n  .filter(s => s.score > 0)\n  .sort((a, b) => b.score - a.score)\n  .slice(0, 20)\n  .map(s => s.node);\n\nreturn [{ json: { matched: scored, query, marketplace, chatId, count: scored.length } }];"
+        "jsCode": "// Parse CSV from Google Sheets and filter by query\nconst resp = $('Fetch Browse Nodes').item.json;\nlet csvText = '';\nif (typeof resp === 'string') {\n  csvText = resp;\n} else if (typeof resp.data === 'string') {\n  csvText = resp.data;\n} else if (typeof resp.body === 'string') {\n  csvText = resp.body;\n} else {\n  csvText = JSON.stringify(resp);\n}\n\nconst query = ($('Parse Message').item.json.categoryQuery || '').toLowerCase().trim();\nconst marketplace = $('Parse Message').item.json.marketplace || 'ES';\nconst chatId = $('Parse Message').item.json.chatId;\n\nif (!csvText || !query) {\n  return [{ json: { matched: [], query, marketplace, chatId, count: 0, error: query ? 'No CSV data' : 'Empty query' } }];\n}\n\nconst lines = csvText.replace(/\\r/g, '').split('\\n').filter(l => l.trim());\nconst allNodes = [];\nconst seen = new Set();\n\nfor (let i = 1; i < lines.length; i++) {\n  const cols = [];\n  let cur = '', inQ = false;\n  for (const ch of lines[i]) {\n    if (ch === '\"') { inQ = !inQ; }\n    else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ''; }\n    else { cur += ch; }\n  }\n  cols.push(cur.trim());\n\n  const esId = (cols[1] || '').trim();\n  const englishPath = (cols[5] || '').trim();\n  if (!esId || !englishPath || seen.has(esId)) continue;\n  seen.add(esId);\n\n  const parts = englishPath.split(' > ').filter(Boolean);\n  allNodes.push({\n    id: esId,\n    name: parts[parts.length - 1] || englishPath,\n    path: englishPath,\n    nodes: {\n      ES: esId || null,\n      UK: (cols[6] || '').trim() || null,\n      DE: (cols[7] || '').trim() || null,\n      FR: (cols[8] || '').trim() || null,\n      IT: (cols[9] || '').trim() || null\n    }\n  });\n}\n\nconst queryParts = query.split(/\\s+/).filter(Boolean);\n\n// Stem handling for singular/plural: woman->women, chairs->chair, accessories->accessor, wipes->wipe\nconst toStem = (w) => {\n  if (w === 'woman') return 'women';\n  if (w === 'men' || w === 'man') return 'men';\n  if (w.endsWith('ies') && w.length > 4) return w.slice(0, -3);\n  if (w.endsWith('s') && w.length > 3) return w.slice(0, -1);\n  return w;\n};\nconst stems = queryParts.map(p => toStem(p));\n\nconst stemMatch = (text, stem, orig) => text.includes(orig) || text.includes(stem);\n\nconst scoreNode = (n) => {\n  const pl = (n.path || '').toLowerCase();\n  const nl = (n.name || '').toLowerCase();\n  let nameHits = 0, pathHits = 0;\n  for (let i = 0; i < stems.length; i++) {\n    if (stemMatch(nl, stems[i], queryParts[i])) nameHits++;\n    if (stemMatch(pl, stems[i], queryParts[i])) pathHits++;\n  }\n  const totalHits = Math.max(nameHits, pathHits);\n  if (totalHits === 0) return 0;\n  let score = totalHits * 3;\n  if (totalHits === stems.length) score += 15;\n  if (nameHits === stems.length) score += 10;\n  score += nameHits * 2 + pathHits;\n  return score;\n};\n\n// First pass: prefer nodes where ALL stems match\nlet scored = allNodes\n  .filter(n => n.nodes && n.nodes[marketplace])\n  .map(n => ({ node: n, score: scoreNode(n) }))\n  .filter(s => s.score > 0);\n\n// If strict all-match found, keep only those; otherwise keep partial matches as fallback\nconst allMatch = scored.filter(s => {\n  const pl = (s.node.path || '').toLowerCase();\n  const nl = (s.node.name || '').toLowerCase();\n  return stems.every((st, i) => stemMatch(pl, st, queryParts[i]) || stemMatch(nl, st, queryParts[i]));\n});\nif (allMatch.length > 0) scored = allMatch;\n\nconst finalNodes = scored\n  .sort((a, b) => b.score - a.score)\n  .slice(0, 20)\n  .map(s => s.node);\n\nconst maxItems = $('Parse Message').item.json.maxItems ?? 200;\nreturn [{ json: { matched: finalNodes, query, marketplace, chatId, count: finalNodes.length, maxItems } }];"
       },
       "id": "node-06",
       "name": "Find Matching Nodes",
@@ -163,7 +163,7 @@
     {
       "parameters": {
         "chatId": "={{ $json.chatId }}",
-        "text": "={{ '🔄 Starting ASIN collection...\\n\\n📂 Categories found: *' + $json.count + '*\\n🌍 Marketplace: *' + $json.marketplace + '*\\n🔍 Query: *' + $json.query + '*\\n\\n_This may take several minutes. I\\'ll notify you when done._' }}",
+        "text": "={{ '🔄 Starting ASIN collection...\\n\\n📂 Categories found: *' + $json.count + '*\\n🌍 Marketplace: *' + $json.marketplace + '*\\n🔍 Query: *' + $json.query + '*\\n📦 Limit: *' + ($json.maxItems === 0 ? 'Unlimited' : $json.maxItems + ' total') + '*\\n\\n_This may take several minutes. I\\'ll notify you when done._' }}",
         "additionalFields": { "parse_mode": "Markdown" }
       },
       "id": "node-09",
@@ -176,7 +176,7 @@
 
     {
       "parameters": {
-        "jsCode": "const { matched, marketplace, chatId, query } = $input.first().json;\nconst MP_DOMAINS = { ES: 'amazon.es', UK: 'amazon.co.uk', DE: 'amazon.de', FR: 'amazon.fr', IT: 'amazon.it' };\nconst MP_COUNTRIES = { ES: 'ES', UK: 'GB', DE: 'DE', FR: 'FR', IT: 'IT' };\nconst domain = MP_DOMAINS[marketplace] || 'amazon.es';\nconst country = MP_COUNTRIES[marketplace] || 'ES';\n\nconst categoryUrls = matched.map(n => ({\n  url: 'https://www.' + domain + '/s?rh=n:' + n.nodes[marketplace] + '&language=en',\n  userData: { categoryName: n.name, categoryPath: n.path, nodeId: n.id }\n}));\n\nreturn [{ json: {\n  actorInput: {\n    categoryOrProductUrls: categoryUrls,\n    proxyCountry: country,\n    maxItems: 200,\n    scrapeSellers: false\n  },\n  marketplace, chatId, query,\n  categoryCount: matched.length,\n  categories: matched.map(n => ({ id: n.id, name: n.name, path: n.path }))\n} }];"
+        "jsCode": "const { matched, marketplace, chatId, query, maxItems } = $('Find Matching Nodes').item.json;\n\n// ── Change this URL when deployed to Cloud Run ──────────────────────\nconst SCRAPER_API_URL = 'http://localhost:8080';\n// ────────────────────────────────────────────────────────────────────\n\nconst MP_DOMAINS = { ES: 'amazon.es', UK: 'amazon.co.uk', DE: 'amazon.de', FR: 'amazon.fr', IT: 'amazon.it' };\nconst domain = MP_DOMAINS[marketplace] || 'amazon.es';\nconst mpLower = marketplace.toLowerCase() === 'uk' ? 'co.uk' : marketplace.toLowerCase();\n\nlet categoryUrls = matched.map(n => ({\n  url: 'https://www.' + domain + '/s?rh=n:' + n.nodes[marketplace] + '&language=en',\n  category_name: n.name,\n  category_path: n.path\n}));\n\n// Limit categories — each yields ~20 items max\nif (maxItems > 0) {\n  const maxCats = Math.max(1, Math.ceil(maxItems / 20));\n  categoryUrls = categoryUrls.slice(0, maxCats);\n}\n\nconst apiRequest = {\n  category_urls: categoryUrls,\n  marketplace: mpLower,\n  max_items: maxItems || 0\n};\n\nreturn [{ json: {\n  apiRequest,\n  apiUrl: SCRAPER_API_URL + '/get-asins',\n  marketplace, chatId, query, maxItems,\n  categoryCount: matched.length,\n  categories: matched.map(n => ({ id: n.id, name: n.name, path: n.path }))\n} }];"
       },
       "id": "node-09b",
       "name": "Build ASIN Actor Input",
@@ -188,25 +188,25 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://api.apify.com/v2/acts/junglee~amazon-crawler/runs",
+        "url": "={{ $json.apiUrl }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
-        "contentType": "json",
-        "body": "={{ JSON.stringify($json.actorInput) }}",
-        "options": { "timeout": 30000 }
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.apiRequest) }}",
+        "options": { "timeout": 3600000 }
       },
       "id": "node-10",
       "name": "Start ASIN Actor",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1840, 40],
-      "credentials": { "httpHeaderAuth": { "id": "2", "name": "Apify API Key" } }
+      "credentials": { "httpHeaderAuth": { "id": "5", "name": "Scraper API Key" } }
     },
 
     {
       "parameters": {
-        "jsCode": "const runData = $('Start ASIN Actor').item.json;\nconst prev = $('Build ASIN Actor Input').item.json;\nconst runId = runData?.data?.id;\nif (!runId) throw new Error('Apify did not return a run ID: ' + JSON.stringify(runData));\nreturn [{ json: { runId, marketplace: prev.marketplace, chatId: prev.chatId, query: prev.query, categories: prev.categories, pollCount: 0 } }];"
+        "jsCode": "const runData = $('Start ASIN Actor').item.json;\nconst prev = $('Build ASIN Actor Input').item.json;\nconst runId = runData?.data?.id;\nif (!runId) throw new Error('Apify did not return a run ID: ' + JSON.stringify(runData));\nreturn [{ json: { runId, marketplace: prev.marketplace, chatId: prev.chatId, query: prev.query, categories: prev.categories, maxItems: prev.maxItems || 0, pollCount: 0 } }];"
       },
       "id": "node-10b",
       "name": "Extract ASIN Run ID",
@@ -242,7 +242,7 @@
 
     {
       "parameters": {
-        "jsCode": "const runStatus = $('Check ASIN Run Status').item.json?.data?.status || 'UNKNOWN';\nconst ctx = $('Wait 45s — ASIN').item.json;\nconst pollCount = (ctx.pollCount || 0) + 1;\nconst timedOut = pollCount >= 40;\nconst isDone = ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(runStatus) || timedOut;\nreturn [{ json: {\n  runId: ctx.runId,\n  chatId: ctx.chatId,\n  query: ctx.query,\n  categories: ctx.categories,\n  marketplace: ctx.marketplace,\n  runStatus,\n  pollCount,\n  statusLabel: isDone ? 'done' : 'pending',\n  timedOut\n} }];"
+        "jsCode": "const runStatus = $('Check ASIN Run Status').item.json?.data?.status || 'UNKNOWN';\nconst ctx = $('Wait 45s — ASIN').item.json;\nconst pollCount = (ctx.pollCount || 0) + 1;\nconst timedOut = pollCount >= 40;\nconst isDone = ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(runStatus) || timedOut;\nreturn [{ json: {\n  runId: ctx.runId,\n  chatId: ctx.chatId,\n  query: ctx.query,\n  categories: ctx.categories,\n  marketplace: ctx.marketplace,\n  maxItems: ctx.maxItems || 0,\n  runStatus,\n  pollCount,\n  statusLabel: isDone ? 'done' : 'pending',\n  timedOut\n} }];"
       },
       "id": "node-13b",
       "name": "Evaluate ASIN Status",
@@ -300,7 +300,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ 'https://api.apify.com/v2/actor-runs/' + $json.runId + '/dataset/items?limit=5000' }}",
+        "url": "={{ 'https://api.apify.com/v2/actor-runs/' + $json.runId + '/dataset/items?limit=' + ($json.maxItems > 0 ? $json.maxItems : 5000) }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}
@@ -315,7 +315,7 @@
 
     {
       "parameters": {
-        "jsCode": "const items = $('Fetch ASIN Results').item.json;\nconst prev = $('ASIN Succeeded?').first().json;\nconst staticData = $getWorkflowStaticData('global');\nconst chatId = prev.chatId;\n\nconst asins = [];\nconst asinSet = new Set();\nconst rawItems = Array.isArray(items) ? items : (items?.items || []);\n\nfor (const item of rawItems) {\n  const asin = item.asin || item.id || item.productAsin;\n  if (asin && /^[A-Z0-9]{10}$/.test(asin) && !asinSet.has(asin)) {\n    asinSet.add(asin);\n    asins.push({\n      asin,\n      title: item.title || item.name || '',\n      category: item.userData?.categoryName || item.categoryName || '',\n      categoryPath: item.userData?.categoryPath || item.categoryPath || ''\n    });\n  }\n}\n\nstaticData[chatId] = {\n  asins,\n  asinCount: asins.length,\n  marketplace: prev.marketplace,\n  categoryQuery: prev.query,\n  categories: prev.categories,\n  collectedAt: new Date().toISOString()\n};\n\nreturn [{ json: { chatId, asinCount: asins.length, marketplace: prev.marketplace, query: prev.query, categories: prev.categories, previewAsins: asins.slice(0, 5) } }];"
+        "jsCode": "// Parse response from custom scraper API (/get-asins)\nconst apiResponse = $('Start ASIN Actor').item.json;\nconst prev = $('Build ASIN Actor Input').item.json;\nconst chatId = prev.chatId;\nconst maxItems = prev.maxItems || 0;\n\n// API returns { status, total, asins: [...] }\nlet rawAsins = [];\nif (Array.isArray(apiResponse.asins)) {\n  rawAsins = apiResponse.asins;\n} else if (Array.isArray(apiResponse)) {\n  rawAsins = apiResponse;\n}\n\nconst allAsins = [];\nconst asinSet = new Set();\n\nfor (const item of rawAsins) {\n  const asin = String(item.asin || '').trim().toUpperCase();\n  if (asin && asin.length >= 8 && !asinSet.has(asin)) {\n    asinSet.add(asin);\n    allAsins.push({\n      asin,\n      title: item.title || '',\n      category: item.category || item.category_name || '',\n      categoryPath: item.category_path || ''\n    });\n  }\n}\n\nconst asins = (maxItems > 0) ? allAsins.slice(0, maxItems) : allAsins;\n\nreturn [{ json: {\n  chatId,\n  asinsJson: JSON.stringify(asins),\n  asinCount: asins.length,\n  maxItems,\n  marketplace: prev.marketplace,\n  categoryQuery: prev.query,\n  collectedAt: new Date().toISOString(),\n  previewAsins: asins.slice(0, 5)\n} }];"
       },
       "id": "node-18",
       "name": "Store ASINs",
@@ -326,27 +326,82 @@
 
     {
       "parameters": {
-        "chatId": "={{ $json.chatId }}",
-        "text": "={{ '✅ *ASIN Collection Complete!*\\n\\n📦 ASINs collected: *' + $json.asinCount + '*\\n🌍 Marketplace: *' + $json.marketplace + '*\\n📂 Categories: *' + ($json.categories || []).length + '*\\n\\n*Preview:*\\n' + ($json.previewAsins || []).map(a => '• `' + a.asin + '` — ' + (a.category || 'N/A')).join('\\n') + '\\n\\n➡️ Send `scrape sellers` to start scraping seller data.' }}",
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": { "__rl": true, "mode": "id", "value": "1gGje_oTmPdDo29YgKewyffm2M7XZ_NNuUmyOAdHs0E4" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Sessions" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chatId": "={{ $json.chatId }}",
+            "asinsJson": "={{ $json.asinsJson }}",
+            "asinCount": "={{ $json.asinCount }}",
+            "marketplace": "={{ $json.marketplace }}",
+            "categoryQuery": "={{ $json.categoryQuery }}",
+            "collectedAt": "={{ $json.collectedAt }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "chatId", "displayName": "chatId", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "asinsJson", "displayName": "asinsJson", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "asinCount", "displayName": "asinCount", "required": false, "defaultMatch": false, "display": true, "type": "number", "canBeUsedToMatch": false },
+            { "id": "marketplace", "displayName": "marketplace", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "categoryQuery", "displayName": "categoryQuery", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "collectedAt", "displayName": "collectedAt", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+          ]
+        },
+        "options": { "headerRow": true }
+      },
+      "id": "node-18b",
+      "name": "Save Session to Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [3820, -100],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "4", "name": "Google Sheets" } }
+
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $('Store ASINs').item.json.chatId }}",
+        "text": "={{ '✅ *ASIN Collection Complete!*\\n\\n📦 ASINs collected: *' + $('Store ASINs').item.json.asinCount + '*' + ($('Store ASINs').item.json.maxItems > 0 ? ' (limit: ' + $('Store ASINs').item.json.maxItems + ')' : ' (unlimited)') + '\\n🌍 Marketplace: *' + $('Store ASINs').item.json.marketplace + '*\\n\\n*Preview:*\\n' + ($('Store ASINs').item.json.previewAsins || []).map(a => '• `' + a.asin + '` — ' + (a.category || 'N/A')).join('\\n') + '\\n\\n➡️ Send `scrape sellers` to start scraping seller data.' }}",
         "additionalFields": { "parse_mode": "Markdown" }
       },
       "id": "node-19",
       "name": "Notify ASINs Done",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [3820, -100],
+      "position": [4040, -100],
       "credentials": { "telegramApi": { "id": "1", "name": "Telegram Bot" } }
     },
 
     {
       "parameters": {
-        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst chatId = $('Parse Message').item.json.chatId;\nconst session = staticData[chatId] || {};\nconst asinCount = (session.asins || []).length;\nreturn [{ json: { ...session, chatId, asinCount } }];"
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": { "__rl": true, "mode": "id", "value": "1gGje_oTmPdDo29YgKewyffm2M7XZ_NNuUmyOAdHs0E4" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Sessions" },
+        "filtersUI": {},
+        "options": { "headerRow": true }
       },
       "id": "node-20",
-      "name": "Load Session State",
+      "name": "Load Session from Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [740, 800],
+      "continueOnFail": true,
+      "credentials": { "googleSheetsOAuth2Api": { "id": "4", "name": "Google Sheets" } }
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\nconst chatId = $('Parse Message').item.json.chatId;\n\n// Find all rows matching this chatId, take the last (most recent)\nconst matching = rows\n  .map(r => r.json)\n  .filter(r => String(r.chatId || '').trim() === String(chatId).trim());\n\nif (matching.length === 0) {\n  return [{ json: { asins: [], asinCount: 0, chatId, marketplace: '', categoryQuery: '' } }];\n}\n\nconst latest = matching[matching.length - 1];\nlet asins = [];\ntry { asins = JSON.parse(latest.asinsJson || '[]'); } catch(e) { asins = []; }\n\nreturn [{ json: {\n  asins,\n  asinCount: asins.length,\n  marketplace: latest.marketplace || '',\n  categoryQuery: latest.categoryQuery || '',\n  chatId\n} }];"
+      },
+      "id": "node-20b",
+      "name": "Parse Loaded Session",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [740, 800]
+      "position": [960, 800]
     },
 
     {
@@ -362,7 +417,7 @@
       "name": "Has Stored ASINs?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [960, 800]
+      "position": [1180, 800]
     },
 
     {
@@ -395,7 +450,7 @@
 
     {
       "parameters": {
-        "jsCode": "const session = $('Load Session State').item.json;\nconst marketplace = session.marketplace || 'ES';\nconst MP_COUNTRIES = { ES: 'ES', UK: 'GB', DE: 'DE', FR: 'FR', IT: 'IT' };\nconst country = MP_COUNTRIES[marketplace] || 'ES';\nconst asinList = (session.asins || []).map(a => a.asin);\nreturn [{ json: {\n  actorInput: { asins: asinList, country },\n  marketplace, chatId: session.chatId,\n  categoryQuery: session.categoryQuery,\n  categories: session.categories || [],\n  asins: session.asins || []\n} }];"
+        "jsCode": "const session = $('Parse Loaded Session').item.json;\nconst marketplace = session.marketplace || 'ES';\n\n// ── Change this URL when deployed to Cloud Run ──────────────────────\nconst SCRAPER_API_URL = 'http://localhost:8080';\n// ────────────────────────────────────────────────────────────────────\n\nconst mpLower = marketplace.toLowerCase() === 'uk' ? 'co.uk' : marketplace.toLowerCase();\nconst asins = session.asins || [];\n\nconst apiRequest = {\n  asins: asins.map(a => ({\n    asin: a.asin,\n    category: a.category || '',\n    category_path: a.categoryPath || ''\n  })),\n  marketplace: mpLower\n};\n\nreturn [{ json: {\n  apiRequest,\n  apiUrl: SCRAPER_API_URL + '/scrape-from-asins',\n  marketplace, chatId: session.chatId,\n  categoryQuery: session.categoryQuery,\n  categories: session.categories || [],\n  asins\n} }];"
       },
       "id": "node-23b",
       "name": "Build Seller Actor Input",
@@ -407,20 +462,20 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://api.apify.com/v2/acts/pintostudio~amazon-seller-info-scraper/runs",
+        "url": "={{ $json.apiUrl }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
-        "contentType": "json",
-        "body": "={{ JSON.stringify($json.actorInput) }}",
-        "options": { "timeout": 30000 }
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.apiRequest) }}",
+        "options": { "timeout": 3600000 }
       },
       "id": "node-24",
       "name": "Start Seller Actor",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1620, 660],
-      "credentials": { "httpHeaderAuth": { "id": "2", "name": "Apify API Key" } }
+      "credentials": { "httpHeaderAuth": { "id": "5", "name": "Scraper API Key" } }
     },
 
     {
@@ -534,7 +589,7 @@
 
     {
       "parameters": {
-        "jsCode": "const rawItems = $('Fetch Seller Results').item.json;\nconst prev = $('Seller Succeeded?').first().json;\nconst asinMeta = {};\nfor (const a of (prev.asins || [])) asinMeta[a.asin] = { category: a.category, categoryPath: a.categoryPath };\n\nconst items = Array.isArray(rawItems) ? rawItems : (rawItems?.items || []);\n\nconst sellers = items.map(item => {\n  const asin = item.asin || item.productAsin || '';\n  const meta = asinMeta[asin] || {};\n  const pathParts = (meta.categoryPath || prev.categoryQuery || 'General').split(' > ');\n  const mainCategory = pathParts[0] || 'General';\n  const subCategory = pathParts.slice(1).join(' > ') || mainCategory;\n  return {\n    asin,\n    marketplace: item.marketplace || prev.marketplace || 'ES',\n    category: meta.category || item.category || '',\n    category_path: meta.categoryPath || '',\n    main_category: mainCategory,\n    sub_category: subCategory,\n    business_name: item.businessName || item.business_name || item.sellerName || '',\n    email: item.email || '',\n    phone: item.phone || item.phoneNumber || item.phone_number || '',\n    business_address: item.businessAddress || item.address || item.business_address || '',\n    vat_number: item.vatNumber || item.vat || item.vat_number || '',\n    status: item.error ? 'ERROR: ' + item.error : 'SUCCESS'\n  };\n});\n\nconst groups = {};\nfor (const s of sellers) {\n  const key = s.main_category + '|||' + s.sub_category;\n  if (!groups[key]) groups[key] = { mainCategory: s.main_category, subCategory: s.sub_category, rows: [] };\n  groups[key].rows.push(s);\n}\n\nreturn [{ json: {\n  sellers,\n  groups: Object.values(groups),\n  totalSellers: sellers.length,\n  chatId: prev.chatId,\n  marketplace: prev.marketplace,\n  categoryQuery: prev.categoryQuery\n} }];"
+        "jsCode": "// Parse response from custom scraper API (/scrape-from-asins)\nconst apiItems = $('Start Seller Actor').all();\nconst prev = $('Build Seller Actor Input').item.json;\n\nconst asinMeta = {};\nfor (const a of (prev.asins || [])) asinMeta[a.asin] = { category: a.category, categoryPath: a.categoryPath };\n\n// API returns { status, total, successful, failed, results: [...] }\nlet items = [];\nif (apiItems.length === 1) {\n  const resp = apiItems[0].json;\n  if (Array.isArray(resp.results)) {\n    items = resp.results;\n  } else if (Array.isArray(resp)) {\n    items = resp;\n  }\n} else {\n  items = apiItems.map(i => i.json);\n}\n\nconst sellers = items.map(item => {\n  const asin = item.asin || '';\n  const meta = asinMeta[asin] || {};\n  const catPath = item.category_path || meta.categoryPath || prev.categoryQuery || 'General';\n  const pathParts = catPath.split(' > ');\n  const mainCategory = pathParts[0] || 'General';\n  const subCategory = pathParts.slice(1).join(' > ') || mainCategory;\n\n  return {\n    asin,\n    marketplace: prev.marketplace || 'ES',\n    category: item.category || meta.category || '',\n    category_path: catPath,\n    main_category: mainCategory,\n    sub_category: subCategory,\n    business_name: item.business_name || '',\n    business_address: item.address || item.raw_info || '',\n    email: item.email || '',\n    phone: item.phone || '',\n    vat_number: item.vat_number || '',\n    seller_url: item.storefront_url || '',\n    status: item.status === 'success' ? 'SUCCESS' : (item.status || 'NO_DATA')\n  };\n}).filter(s => s.asin);\n\nconst groups = {};\nfor (const s of sellers) {\n  const key = s.main_category + '|||' + s.sub_category;\n  if (!groups[key]) groups[key] = { mainCategory: s.main_category, subCategory: s.sub_category, rows: [] };\n  groups[key].rows.push(s);\n}\n\nreturn [{ json: {\n  sellers,\n  groups: Object.values(groups),\n  totalSellers: sellers.length,\n  chatId: prev.chatId,\n  marketplace: prev.marketplace,\n  categoryQuery: prev.categoryQuery\n} }];"
       },
       "id": "node-32",
       "name": "Process Seller Data",
@@ -641,7 +696,7 @@
 
     {
       "parameters": {
-        "jsCode": "const spreadsheetId = $('Create Spreadsheet').item.json.spreadsheetId;\nconst groupData = $('Attach Sub Folder ID').item.json;\nconst rows = groupData.rows || [];\n\nif (rows.length === 0) {\n  return [{ json: { spreadsheetId, isEmpty: true, chatId: groupData.chatId, mainCategory: groupData.mainCategory, subCategory: groupData.subCategory, totalSellers: groupData.totalSellers, marketplace: groupData.marketplace } }];\n}\n\nreturn rows.map(row => ({\n  json: {\n    spreadsheetId,\n    chatId: groupData.chatId,\n    mainCategory: groupData.mainCategory,\n    subCategory: groupData.subCategory,\n    totalSellers: groupData.totalSellers,\n    marketplace: groupData.marketplace,\n    ASIN: row.asin,\n    Marketplace: row.marketplace,\n    Category: row.category,\n    'Category Path': row.category_path,\n    'Business Name': row.business_name,\n    Email: row.email,\n    Phone: row.phone,\n    'Business Address': row.business_address,\n    'VAT Number': row.vat_number,\n    Status: row.status\n  }\n}));"
+        "jsCode": "const spreadsheetId = $('Create Spreadsheet').item.json.spreadsheetId;\nconst groupData = $('Attach Sub Folder ID').item.json;\nconst rows = groupData.rows || [];\n\nif (rows.length === 0) {\n  return [{ json: { spreadsheetId, isEmpty: true, chatId: groupData.chatId, mainCategory: groupData.mainCategory, subCategory: groupData.subCategory, totalSellers: groupData.totalSellers, marketplace: groupData.marketplace } }];\n}\n\nreturn rows.map(row => ({\n  json: {\n    spreadsheetId,\n    chatId: groupData.chatId,\n    mainCategory: groupData.mainCategory,\n    subCategory: groupData.subCategory,\n    totalSellers: groupData.totalSellers,\n    marketplace: groupData.marketplace,\n    ASIN: row.asin,\n    Marketplace: row.marketplace,\n    Category: row.category,\n    'Category Path': row.category_path,\n    'Business Name': row.business_name,\n    'Business Address': row.business_address,\n    Email: row.email,\n    Phone: row.phone,\n    'VAT Number': row.vat_number,\n    'Seller URL': row.seller_url,\n    Status: row.status\n  }\n}));"
       },
       "id": "node-42b",
       "name": "Prepare Sheet Rows",
@@ -686,7 +741,7 @@
     {
       "parameters": {
         "chatId": "={{ $json.chatId }}",
-        "text": "={{ '✅ *Seller Scraping Complete!*\\n\\n📊 Sellers found: *' + $json.totalSellers + '*\\n🌍 Marketplace: *' + $json.marketplace + '*\\n\\n📁 *Saved to Google Drive:*\\n📂 ' + $json.mainCategory + '\\n   📂 ' + $json.subCategory + '\\n      📊 Seller Data Sheet\\n\\nOpen Google Drive to view your data.' }}",
+        "text": "={{ '✅ *Seller Scraping Complete!*\\n\\n📊 Sellers found: *' + $json.totalSellers + '*\\n🌍 Marketplace: *' + $json.marketplace + '*\\n\\n📁 *Saved to Google Drive:*\\n📂 ' + $json.mainCategory + '\\n   📂 ' + $json.subCategory + '\\n      📊 Seller Data Sheet\\n\\n🔗 [Open Spreadsheet](https://docs.google.com/spreadsheets/d/' + $json.spreadsheetId + '/edit)' }}",
         "additionalFields": { "parse_mode": "Markdown" }
       },
       "id": "node-44",
@@ -709,7 +764,7 @@
     "Route by Intent": {
       "main": [
         [{ "node": "Fetch Browse Nodes", "type": "main", "index": 0 }],
-        [{ "node": "Load Session State", "type": "main", "index": 0 }],
+        [{ "node": "Load Session from Sheets", "type": "main", "index": 0 }],
         [{ "node": "Send Status", "type": "main", "index": 0 }],
         [{ "node": "Send Help", "type": "main", "index": 0 }]
       ]
@@ -733,39 +788,18 @@
       "main": [[{ "node": "Start ASIN Actor", "type": "main", "index": 0 }]]
     },
     "Start ASIN Actor": {
-      "main": [[{ "node": "Extract ASIN Run ID", "type": "main", "index": 0 }]]
-    },
-    "Extract ASIN Run ID": {
-      "main": [[{ "node": "Wait 45s — ASIN", "type": "main", "index": 0 }]]
-    },
-    "Wait 45s — ASIN": {
-      "main": [[{ "node": "Check ASIN Run Status", "type": "main", "index": 0 }]]
-    },
-    "Check ASIN Run Status": {
-      "main": [[{ "node": "Evaluate ASIN Status", "type": "main", "index": 0 }]]
-    },
-    "Evaluate ASIN Status": {
-      "main": [[{ "node": "ASIN Run Finished?", "type": "main", "index": 0 }]]
-    },
-    "ASIN Run Finished?": {
-      "main": [
-        [{ "node": "ASIN Succeeded?", "type": "main", "index": 0 }],
-        [{ "node": "Wait 45s — ASIN", "type": "main", "index": 0 }]
-      ]
-    },
-    "ASIN Succeeded?": {
-      "main": [
-        [{ "node": "Fetch ASIN Results", "type": "main", "index": 0 }],
-        [{ "node": "Notify ASIN Failed", "type": "main", "index": 0 }]
-      ]
-    },
-    "Fetch ASIN Results": {
       "main": [[{ "node": "Store ASINs", "type": "main", "index": 0 }]]
     },
     "Store ASINs": {
+      "main": [[{ "node": "Save Session to Sheets", "type": "main", "index": 0 }]]
+    },
+    "Save Session to Sheets": {
       "main": [[{ "node": "Notify ASINs Done", "type": "main", "index": 0 }]]
     },
-    "Load Session State": {
+    "Load Session from Sheets": {
+      "main": [[{ "node": "Parse Loaded Session", "type": "main", "index": 0 }]]
+    },
+    "Parse Loaded Session": {
       "main": [[{ "node": "Has Stored ASINs?", "type": "main", "index": 0 }]]
     },
     "Has Stored ASINs?": {
@@ -781,33 +815,6 @@
       "main": [[{ "node": "Start Seller Actor", "type": "main", "index": 0 }]]
     },
     "Start Seller Actor": {
-      "main": [[{ "node": "Extract Seller Run ID", "type": "main", "index": 0 }]]
-    },
-    "Extract Seller Run ID": {
-      "main": [[{ "node": "Wait 60s — Seller", "type": "main", "index": 0 }]]
-    },
-    "Wait 60s — Seller": {
-      "main": [[{ "node": "Check Seller Run Status", "type": "main", "index": 0 }]]
-    },
-    "Check Seller Run Status": {
-      "main": [[{ "node": "Evaluate Seller Status", "type": "main", "index": 0 }]]
-    },
-    "Evaluate Seller Status": {
-      "main": [[{ "node": "Seller Run Finished?", "type": "main", "index": 0 }]]
-    },
-    "Seller Run Finished?": {
-      "main": [
-        [{ "node": "Seller Succeeded?", "type": "main", "index": 0 }],
-        [{ "node": "Wait 60s — Seller", "type": "main", "index": 0 }]
-      ]
-    },
-    "Seller Succeeded?": {
-      "main": [
-        [{ "node": "Fetch Seller Results", "type": "main", "index": 0 }],
-        [{ "node": "Notify Seller Failed", "type": "main", "index": 0 }]
-      ]
-    },
-    "Fetch Seller Results": {
       "main": [[{ "node": "Process Seller Data", "type": "main", "index": 0 }]]
     },
     "Process Seller Data": {
