@@ -7,13 +7,12 @@ from playwright.async_api import Page
 
 # ─────────────────────────────────────────
 # Delay Profiles
-# Use "cautious" for Amazon (recommended)
 # ─────────────────────────────────────────
 DELAY_PROFILES = {
-    "fast":     {"min": 500,  "max": 1500},   # Risky on Amazon
-    "normal":   {"min": 1500, "max": 3500},   # Balanced
-    "cautious": {"min": 3000, "max": 7000},   # Recommended for Amazon
-    "paranoid": {"min": 7000, "max": 15000},  # Maximum safety
+    "fast":     {"min": 300,   "max": 800},
+    "normal":   {"min": 800,   "max": 2000},
+    "cautious": {"min": 1500,  "max": 3500},   # tightened for speed
+    "paranoid": {"min": 4000,  "max": 8000},
 }
 
 ACTIVE_PROFILE = "cautious"
@@ -27,82 +26,109 @@ async def random_delay(profile: str = ACTIVE_PROFILE):
 
 
 async def micro_delay():
-    """Tiny pause — simulates human reaction time between actions."""
-    await asyncio.sleep(random.uniform(0.1, 0.5))
+    """Tiny pause — simulates human reaction time."""
+    await asyncio.sleep(random.uniform(0.1, 0.4))
 
 
 async def simulate_mouse_movement(page: Page):
     """
-    Move mouse in a natural curved path across the page.
-    Humans never move mouse in straight lines.
+    Move mouse in a Bezier-curve-like path (more natural than linear).
+    Humans never move the mouse in a straight line.
     """
-    start_x = random.randint(100, 400)
-    start_y = random.randint(100, 400)
-    end_x = random.randint(500, 1200)
-    end_y = random.randint(200, 700)
+    # Pick random start and end points in typical reading zone
+    sx = random.randint(200, 600)
+    sy = random.randint(150, 450)
+    ex = random.randint(400, 1100)
+    ey = random.randint(300, 650)
 
-    steps = random.randint(10, 20)
-    for i in range(steps):
-        x = start_x + (end_x - start_x) * i / steps + random.randint(-5, 5)
-        y = start_y + (end_y - start_y) * i / steps + random.randint(-5, 5)
+    # Control points for a slight curve
+    cx = (sx + ex) // 2 + random.randint(-80, 80)
+    cy = (sy + ey) // 2 + random.randint(-60, 60)
+
+    steps = random.randint(12, 22)
+    for i in range(steps + 1):
+        t = i / steps
+        # Quadratic Bezier interpolation
+        x = int((1 - t) ** 2 * sx + 2 * (1 - t) * t * cx + t ** 2 * ex)
+        y = int((1 - t) ** 2 * sy + 2 * (1 - t) * t * cy + t ** 2 * ey)
+        # Add micro-jitter for realism
+        x += random.randint(-3, 3)
+        y += random.randint(-3, 3)
         await page.mouse.move(x, y)
-        await asyncio.sleep(random.uniform(0.01, 0.05))
+        await asyncio.sleep(random.uniform(0.008, 0.04))
+
+    # Occasionally pause briefly mid-path (human hesitation)
+    if random.random() < 0.25:
+        await asyncio.sleep(random.uniform(0.1, 0.35))
 
 
-async def simulate_scroll(page: Page):
+async def simulate_scroll(page: Page, amount: int = 0):
     """
     Scroll down the page naturally, as a human would when reading content.
+    amount=0 → random scroll (300-700px), otherwise scroll that exact amount.
     """
-    total_scroll = random.randint(300, 800)
-    chunks = random.randint(3, 6)
+    total_scroll = amount if amount > 0 else random.randint(300, 700)
+    chunks = random.randint(3, 5)
     scroll_per_chunk = total_scroll // chunks
 
-    for _ in range(chunks):
-        await page.evaluate(f"window.scrollBy(0, {scroll_per_chunk})")
-        await asyncio.sleep(random.uniform(0.3, 0.9))
+    for chunk in range(chunks):
+        # Vary speed between chunks (humans scroll unevenly)
+        jitter = random.randint(-20, 20)
+        await page.evaluate(f"window.scrollBy(0, {scroll_per_chunk + jitter})")
+        await asyncio.sleep(random.uniform(0.25, 0.75))
 
-    # Sometimes scroll back up a little (humans do this)
-    if random.random() < 0.3:
-        await page.evaluate(f"window.scrollBy(0, -{random.randint(50, 150)})")
-        await asyncio.sleep(random.uniform(0.2, 0.5))
+    # 30% chance to scroll back up slightly (natural reading behaviour)
+    if random.random() < 0.30:
+        await page.evaluate(f"window.scrollBy(0, -{random.randint(40, 120)})")
+        await asyncio.sleep(random.uniform(0.15, 0.40))
 
 
 async def simulate_reading_pause(page: Page):
     """Pause as if reading the page content."""
-    read_time = random.uniform(2.0, 5.0)
-    await asyncio.sleep(read_time)
+    await asyncio.sleep(random.uniform(0.8, 2.5))
 
 
 async def simulate_page_entry(page: Page):
     """
-    Full sequence of human behaviour when landing on a new page:
-    1. Brief pause (page loaded, eyes scanning)
-    2. Mouse movement
-    3. Scroll to read
-    4. Reading pause
+    Human-behaviour sequence for product pages.
+    Total time: ~3-7 seconds (optimised for speed while retaining realism).
     """
     await micro_delay()
     await simulate_mouse_movement(page)
-    await random_delay("cautious")
+    await random_delay("normal")         # 0.8-2s — eyes scan
     await simulate_scroll(page)
-    await simulate_reading_pause(page)
+    await simulate_reading_pause(page)   # 0.8-2.5s
+
+
+async def simulate_page_entry_fast(page: Page):
+    """
+    Lightweight behaviour for seller info pages.
+    Total time: ~0.8-2 seconds.
+    """
+    await micro_delay()
+    await simulate_scroll(page, amount=random.randint(150, 400))
+    await asyncio.sleep(random.uniform(0.6, 1.5))
 
 
 async def block_unnecessary_resources(page: Page):
     """
-    Block images, CSS fonts, and media to speed up scraping.
-    We only need the HTML text content.
+    Block images, fonts, and media to speed up page loads.
+    Keep scripts and stylesheets — Amazon needs them for buybox rendering.
+    Block known analytics/ad domains to reduce noise.
     """
-    async def handle_route(route):
-        resource_type = route.request.resource_type
-        blocked_types = ["image", "media", "font"]   # keep stylesheet — Amazon needs it for buybox
-        blocked_domains = ["google-analytics.com", "doubleclick.net",
-                           "amazon-adsystem.com", "scorecardresearch.com"]
+    BLOCKED_TYPES = {"image", "media", "font"}
+    BLOCKED_DOMAINS = {
+        "google-analytics.com", "doubleclick.net",
+        "amazon-adsystem.com", "scorecardresearch.com",
+        "fls-na.amazon.com", "s.amazon-adsystem.com",
+        "pixel.advertising.com", "ib.anycast.adnxs.com",
+    }
 
-        url = route.request.url
-        if resource_type in blocked_types:
+    async def handle_route(route):
+        req = route.request
+        if req.resource_type in BLOCKED_TYPES:
             await route.abort()
-        elif any(domain in url for domain in blocked_domains):
+        elif any(d in req.url for d in BLOCKED_DOMAINS):
             await route.abort()
         else:
             await route.continue_()

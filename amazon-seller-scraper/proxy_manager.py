@@ -1,6 +1,7 @@
 # proxy_manager.py
 
 import random
+import time
 
 # ─────────────────────────────────────────
 # Your Webshare Residential Proxies
@@ -36,24 +37,54 @@ def parse_proxies(raw_list: list[str]) -> list[dict]:
 PROXIES = parse_proxies(RAW_PROXIES)
 
 # Track usage count per proxy to distribute load evenly
-_usage_count = {i: 0 for i in range(len(PROXIES))}
-_last_used_index = -1
+_usage_count: dict[int, int] = {i: 0 for i in range(len(PROXIES))}
+_last_used_index: int = -1
+
+# Failed proxy tracking — skip proxies that recently returned bot-detection pages
+_failed_at: dict[int, float] = {}  # index -> unix timestamp of last failure
+PROXY_COOLDOWN_SECS = 300  # 5 minutes before a failed proxy is tried again
+
+
+def mark_proxy_failed(proxy_dict: dict) -> None:
+    """
+    Call this when a proxy returns a bot-detection/blocked page.
+    The proxy will be skipped for PROXY_COOLDOWN_SECS seconds.
+    """
+    for i, p in enumerate(PROXIES):
+        if p["server"] == proxy_dict.get("server", ""):
+            _failed_at[i] = time.time()
+            print(f"  [PROXY] Proxy #{i} marked failed — cooldown {PROXY_COOLDOWN_SECS}s")
+            break
 
 
 def get_proxy() -> dict:
     """
     Returns a proxy using weighted rotation:
+    - Skip recently failed proxies (cooldown window)
     - Prefer least-used proxy
-    - Add randomness to avoid strict patterns
     - Never use same proxy twice in a row
     """
     global _last_used_index
 
-    sorted_indices = sorted(_usage_count.keys(), key=lambda i: _usage_count[i])
-    candidates = [i for i in sorted_indices[:5] if i != _last_used_index]
+    now = time.time()
 
-    if not candidates:
-        candidates = [i for i in sorted_indices if i != _last_used_index]
+    # Exclude recently failed and last-used proxy
+    available = [
+        i for i in range(len(PROXIES))
+        if now - _failed_at.get(i, 0) > PROXY_COOLDOWN_SECS and i != _last_used_index
+    ]
+
+    # If all proxies are in cooldown, ignore cooldown (must use something)
+    if not available:
+        available = [i for i in range(len(PROXIES)) if i != _last_used_index]
+
+    # If still empty (single proxy), use any
+    if not available:
+        available = list(range(len(PROXIES)))
+
+    # Sort by usage count (least used first) and pick randomly from top 4
+    sorted_by_use = sorted(available, key=lambda i: _usage_count[i])
+    candidates = sorted_by_use[:4]
 
     chosen_index = random.choice(candidates)
     _usage_count[chosen_index] += 1
@@ -72,7 +103,7 @@ def get_proxy_for_playwright() -> dict:
     }
 
 
-def reset_usage_counts():
+def reset_usage_counts() -> None:
     """Reset usage counts — call this daily if running long-term."""
     global _usage_count
     _usage_count = {i: 0 for i in range(len(PROXIES))}

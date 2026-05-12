@@ -8,6 +8,7 @@ import io
 if hasattr(sys.stdout, 'buffer'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
+import asyncio
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -17,6 +18,10 @@ from scraper import scrape_sellers_batch, scrape_asins_batch, scrape_sellers_fro
 load_dotenv()
 
 app = FastAPI(title="Amazon Seller Scraper API")
+
+# Allow 2 concurrent batch requests — each batch already runs _ASIN_CONCURRENCY ASINs
+# in parallel internally. 2 here covers concurrent users or back-to-back batch requests.
+_scrape_lock = asyncio.Semaphore(2)
 
 API_KEY = os.environ.get("API_KEY", "change-this-secret-key")
 
@@ -111,7 +116,8 @@ async def scrape_sellers(
     if len(request.seller_ids) > 50:
         raise HTTPException(status_code=400, detail="Max 50 sellers per request")
 
-    results = await scrape_sellers_batch(request.seller_ids, request.marketplace)
+    async with _scrape_lock:
+        results = await scrape_sellers_batch(request.seller_ids, request.marketplace)
     successful = sum(1 for r in results if r.get("status") == "success")
 
     return ScrapeResponse(
@@ -140,8 +146,8 @@ async def get_asins(
 
     if not request.category_urls:
         raise HTTPException(status_code=400, detail="category_urls cannot be empty")
-    if len(request.category_urls) > 20:
-        raise HTTPException(status_code=400, detail="Max 20 category URLs per request")
+    if len(request.category_urls) > 100:
+        raise HTTPException(status_code=400, detail="Max 100 category URLs per request")
 
     category_urls = [
         {
@@ -152,11 +158,12 @@ async def get_asins(
         for c in request.category_urls
     ]
 
-    asins = await scrape_asins_batch(
-        category_urls=category_urls,
-        marketplace=request.marketplace,
-        max_items=request.max_items,
-    )
+    async with _scrape_lock:
+        asins = await scrape_asins_batch(
+            category_urls=category_urls,
+            marketplace=request.marketplace,
+            max_items=request.max_items,
+        )
 
     return GetAsinsResponse(
         status="complete",
@@ -197,7 +204,8 @@ async def scrape_from_asins(
         for a in request.asins
     ]
 
-    results = await scrape_sellers_from_asins_batch(asin_list, request.marketplace)
+    async with _scrape_lock:
+        results = await scrape_sellers_from_asins_batch(asin_list, request.marketplace)
     successful = sum(1 for r in results if r.get("status") == "success")
 
     return ScrapeResponse(
@@ -223,4 +231,10 @@ def root():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        timeout_keep_alive=75,   # keep TCP alive during long scrapes (default 5s causes "fetch failed")
+        timeout_graceful_shutdown=30,
+    )

@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { v4 as uuidv4 } from 'uuid';
 import { Parser } from 'json2csv';
+import * as XLSX from 'xlsx';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -16,19 +17,12 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const APIFY_API_TOKEN = process.env.APIFY_API_TOKEN;
-const APIFY_BASE_URL = process.env.APIFY_BASE_URL || 'https://api.apify.com/v2';
-const ACTOR_PRODUCT_SCRAPER = process.env.ACTOR_PRODUCT_SCRAPER || 'junglee~amazon-crawler';
-const ACTOR_SELLER_INFO = process.env.ACTOR_SELLER_INFO || 'pintostudio~amazon-seller-info-scraper';
-const ACTOR_FALLBACK = process.env.ACTOR_FALLBACK || 'apify~web-scraper';
-const ACTOR_ASIN_COLLECTOR = process.env.ACTOR_ASIN_COLLECTOR || 'junglee~amazon-crawler';
+const SCRAPER_URL = process.env.SCRAPER_URL || 'http://127.0.0.1:8080';
+const SCRAPER_API_KEY = process.env.SCRAPER_API_KEY || 'insider7-ResProx04';
 
-console.log('[Server] APIFY_API_TOKEN present:', !!APIFY_API_TOKEN);
-console.log('[Server] ACTOR_PRODUCT_SCRAPER:', ACTOR_PRODUCT_SCRAPER);
-console.log('[Server] ACTOR_ASIN_COLLECTOR:', ACTOR_ASIN_COLLECTOR);
+console.log('[Server] Scraper URL:', SCRAPER_URL);
 
 // ─── Browse Nodes Loader ──────────────────────────────────────────────────────
-// Supports JSON (browse-nodes.json) and the spreadsheet CSV format (browse-nodes.csv)
 
 function parseCsvLine(line) {
   const result = [];
@@ -51,9 +45,8 @@ function parseCsvLine(line) {
 
 function loadBrowseNodesFromCsv(csvContent) {
   const lines = csvContent.split('\n').filter(l => l.trim());
-  // Expected columns: Node root, Node ID, Part 1, Part 2, Node Path (ES), Translate (EN), UK, DE, FR, IT
+  // Columns: Node root, Node ID, Part 1, Part 2, Node Path (ES), Translate (EN), UK, DE, FR, IT
 
-  // First pass: parse all rows
   const raw = lines.slice(1).map((line, i) => {
     const v = parseCsvLine(line);
     const englishPath = (v[5] || v[4] || '').replace(/^\/Categories\//, '').replace(/\//g, ' > ').trim();
@@ -73,7 +66,6 @@ function loadBrowseNodesFromCsv(csvContent) {
     return { id: `node-${esId || i}`, name, spanishLeaf, path: englishPath || name, root: v[0] || 'unknown', esId, nodes };
   }).filter(n => Object.values(n.nodes).some(id => id));
 
-  // Deduplicate by ES node ID — keep the row with the most non-empty marketplace IDs
   const byEsId = new Map();
   for (const node of raw) {
     if (!node.esId) continue;
@@ -87,8 +79,6 @@ function loadBrowseNodesFromCsv(csvContent) {
   }
   const deduped = [...byEsId.values()];
 
-  // Disambiguate same-path nodes (case-insensitive): when two nodes share the same
-  // English path, append the Spanish leaf term so both remain identifiable in the tree
   const byPath = new Map();
   for (const node of deduped) {
     const key = node.path.toLowerCase();
@@ -101,7 +91,6 @@ function loadBrowseNodesFromCsv(csvContent) {
     if (group.length === 1) {
       result.push(group[0]);
     } else {
-      // First pass: try Spanish leaf disambiguation
       const labeled = group.map(node => {
         const label = node.spanishLeaf && node.spanishLeaf.toLowerCase() !== node.name.toLowerCase()
           ? `${node.name} (${node.spanishLeaf})`
@@ -109,7 +98,6 @@ function loadBrowseNodesFromCsv(csvContent) {
         return { node, label };
       });
 
-      // Second pass: if labels are still not unique, append the root category
       const labelCounts = new Map();
       for (const { label } of labeled) labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
 
@@ -167,121 +155,40 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // ─── Marketplace Config ───────────────────────────────────────────────────────
 
 const MARKETPLACES = {
-  ES: { domain: 'amazon.es', country: 'ES', countryIso: 'es' },
-  UK: { domain: 'amazon.co.uk', country: 'GB', countryIso: 'gb' },
-  DE: { domain: 'amazon.de', country: 'DE', countryIso: 'de' },
-  FR: { domain: 'amazon.fr', country: 'FR', countryIso: 'fr' },
-  IT: { domain: 'amazon.it', country: 'IT', countryIso: 'it' },
+  ES: { domain: 'amazon.es', mpCode: 'es' },
+  UK: { domain: 'amazon.co.uk', mpCode: 'co.uk' },
+  DE: { domain: 'amazon.de', mpCode: 'de' },
+  FR: { domain: 'amazon.fr', mpCode: 'fr' },
+  IT: { domain: 'amazon.it', mpCode: 'it' },
 };
 
-// ─── Apify Helpers ────────────────────────────────────────────────────────────
+// ─── Custom Scraper Helpers ───────────────────────────────────────────────────
 
-async function apifyRunActor(actorId, input) {
-  if (!APIFY_API_TOKEN) {
-    throw new Error('APIFY_API_TOKEN is missing in .env file');
-  }
-
-  const url = `${APIFY_BASE_URL}/acts/${actorId}/runs?token=${APIFY_API_TOKEN}`;
-  console.log(`[Apify] Starting actor: ${actorId}`);
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  });
-
-  const rawText = await res.text();
-  let data;
+async function scraperPost(endpoint, body, timeoutMs = 600000) { // 10 min default
+  const url = `${SCRAPER_URL}${endpoint}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
   try {
-    data = JSON.parse(rawText);
-  } catch {
-    throw new Error(`Apify returned non-JSON for actor ${actorId}: ${rawText.slice(0, 200)}`);
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': SCRAPER_API_KEY,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!res.ok) {
-    const errMsg = data?.error?.message || data?.message || res.statusText;
-    throw new Error(`Apify API error starting ${actorId} (${res.status}): ${errMsg}`);
+    const text = await res.text();
+    throw new Error(`Scraper ${endpoint} returned ${res.status}: ${text.slice(0, 300)}`);
   }
 
-  if (!data?.data?.id) {
-    throw new Error(`Apify response missing run ID for ${actorId}. Response: ${JSON.stringify(data).slice(0, 300)}`);
-  }
-
-  console.log(`[Apify] Started actor ${actorId} with run ID: ${data.data.id}`);
-  return data.data;
-}
-
-async function apifyWaitAndFetch(runId, pollIntervalMs = 4000, maxWaitMs = 300000) {
-  const startTime = Date.now();
-  console.log(`[Apify] Polling run: ${runId}`);
-
-  while (true) {
-    if (Date.now() - startTime > maxWaitMs) {
-      throw new Error(`Apify run ${runId} timed out after ${maxWaitMs / 1000}s`);
-    }
-
-    const res = await fetch(`${APIFY_BASE_URL}/actor-runs/${runId}?token=${APIFY_API_TOKEN}`);
-    const rawText = await res.text();
-    let data;
-    try {
-      data = JSON.parse(rawText);
-    } catch {
-      throw new Error(`Apify status returned non-JSON: ${rawText.slice(0, 200)}`);
-    }
-
-    if (!res.ok) {
-      throw new Error(`Apify status check failed (${res.status}): ${data?.error?.message || res.statusText}`);
-    }
-
-    const runStatus = data?.data?.status;
-    console.log(`[Apify] Run ${runId} status: ${runStatus}`);
-
-    if (runStatus === 'SUCCEEDED') break;
-    if (['FAILED', 'ABORTED', 'TIMED-OUT'].includes(runStatus)) {
-      throw new Error(`Apify run ${runId} ended with status: ${runStatus}`);
-    }
-
-    await delay(pollIntervalMs);
-  }
-
-  const itemsRes = await fetch(
-    `${APIFY_BASE_URL}/actor-runs/${runId}/dataset/items?token=${APIFY_API_TOKEN}`
-  );
-  const itemsRaw = await itemsRes.text();
-  let items;
-  try {
-    items = JSON.parse(itemsRaw);
-  } catch {
-    throw new Error(`Apify dataset returned non-JSON: ${itemsRaw.slice(0, 200)}`);
-  }
-
-  console.log(`[Apify] Run ${runId} returned ${Array.isArray(items) ? items.length : 'unknown'} items`);
-  if (Array.isArray(items) && items.length > 0) {
-    console.log(`[Apify] First item keys: ${Object.keys(items[0]).join(', ')}`);
-  }
-
-  return items;
-}
-
-// ─── ASIN Extraction Helpers ──────────────────────────────────────────────────
-
-function extractAsinFromUrl(url) {
-  if (!url) return null;
-  const m = url.match(/\/dp\/([A-Z0-9]{10})/i);
-  return m ? m[1].toUpperCase() : null;
-}
-
-function extractAsinsFromItems(items) {
-  const seen = new Set();
-  const result = [];
-  for (const item of (items || [])) {
-    const asin = item.asin || item.ASIN || extractAsinFromUrl(item.url || item.productUrl);
-    if (asin && /^[A-Z0-9]{10}$/.test(asin) && !seen.has(asin)) {
-      seen.add(asin);
-      result.push({ asin, title: item.title || item.name || '' });
-    }
-  }
-  return result;
+  return res.json();
 }
 
 // ─── ASIN Collection Agent ────────────────────────────────────────────────────
@@ -291,7 +198,7 @@ async function runAsinCollectionAgent(collectRunId, selectedNodeIds, marketplace
   const logs = [];
   let processed = 0;
 
-  // Build task list: each category × marketplace combo
+  // Build tasks: each category × marketplace
   const tasks = [];
   for (const nodeId of selectedNodeIds) {
     const nodeInfo = browseNodes.find(n => n.id === nodeId);
@@ -299,9 +206,7 @@ async function runAsinCollectionAgent(collectRunId, selectedNodeIds, marketplace
     for (const marketplace of marketplaces) {
       const config = MARKETPLACES[marketplace];
       if (!config) continue;
-      const mpNodeId = nodeInfo.nodes[marketplace];
-      if (!mpNodeId) continue;
-      tasks.push({ nodeId, nodeInfo, marketplace, config, mpNodeId });
+      tasks.push({ nodeId, nodeInfo, marketplace, config });
     }
   }
 
@@ -322,67 +227,106 @@ async function runAsinCollectionAgent(collectRunId, selectedNodeIds, marketplace
   updateState('RUNNING', null);
 
   try {
-    for (const { nodeInfo, marketplace, config, mpNodeId } of tasks) {
-      const categoryUrl = `https://www.${config.domain}/s?rh=n:${mpNodeId}&language=en`;
-      console.log(`\n[Collector] Category: "${nodeInfo.name}" on ${marketplace} → ${categoryUrl}`);
+    // Group tasks by marketplace for efficient batching
+    const byMarketplace = new Map();
+    for (const task of tasks) {
+      if (!byMarketplace.has(task.marketplace)) byMarketplace.set(task.marketplace, []);
+      byMarketplace.get(task.marketplace).push(task);
+    }
 
-      updateState('RUNNING', {
-        category: nodeInfo.name,
-        marketplace,
-        status: 'PROCESSING',
-        message: `Fetching ASINs from ${marketplace}...`,
+    for (const [marketplace, mpTasks] of byMarketplace) {
+      const config = MARKETPLACES[marketplace];
+
+      // Build keyword search URLs (more reliable than browse node ?rh=n: format)
+      const categoryUrls = mpTasks.map(({ nodeInfo }) => {
+        const catName = (nodeInfo.name || '').replace(/[^a-zA-Z0-9\s]/g, ' ').trim();
+        // Don't append &language=en for UK (already English; causes routing issues)
+        const langParam = marketplace !== 'UK' ? '&language=en' : '';
+        return {
+          url: `https://www.${config.domain}/s?k=${encodeURIComponent(catName)}${langParam}`,
+          category_name: nodeInfo.name,
+          category_path: nodeInfo.path,
+        };
       });
 
-      try {
-        const actorInput = {
-          categoryOrProductUrls: [{ url: categoryUrl }],
-          proxyCountry: config.country,
-          scrapeSellers: false,
-        };
-        // maxPerCategory === 0 means unlimited — omit maxItems so Apify crawls all pages
-        if (maxPerCategory > 0) actorInput.maxItems = maxPerCategory;
+      console.log(`\n[Collector] ${marketplace}: ${categoryUrls.length} categories via custom scraper`);
 
-        const run = await apifyRunActor(ACTOR_ASIN_COLLECTOR, actorInput);
+      // Process in batches of 20 so we get progressive updates and avoid the API limit
+      const CAT_BATCH = 20;
+      for (let bi = 0; bi < categoryUrls.length; bi += CAT_BATCH) {
+        const catBatch = categoryUrls.slice(bi, bi + CAT_BATCH);
+        const batchNum = Math.floor(bi / CAT_BATCH) + 1;
+        const totalBatches = Math.ceil(categoryUrls.length / CAT_BATCH);
 
-        const items = await apifyWaitAndFetch(run.id);
-        const found = extractAsinsFromItems(items);
-
-        for (const { asin, title } of found) {
-          collectedAsins.push({
-            asin,
-            title,
-            category: nodeInfo.name,
-            category_path: nodeInfo.path,
-            source_marketplace: marketplace,
+        // Emit one PROCESSING log per category so the UI shows the actual category name
+        for (const catItem of catBatch) {
+          logs.push({
+            category: catItem.category_name || catItem.category_path || marketplace,
+            marketplace,
+            status: 'PROCESSING',
+            message: `Collecting ASINs...`,
           });
         }
+        collectRuns.set(collectRunId, {
+          ...collectRuns.get(collectRunId),
+          status: 'RUNNING',
+          processed,
+          total,
+          logs: [...logs],
+          asins: [...collectedAsins],
+        });
 
-        logs.push({
-          category: nodeInfo.name,
-          marketplace,
-          status: 'SUCCESS',
-          message: `Found ${found.length} ASINs`,
-        });
-        console.log(`[Collector] Found ${found.length} ASINs for "${nodeInfo.name}" on ${marketplace}`);
-      } catch (err) {
-        console.error(`[Collector] Failed for "${nodeInfo.name}" on ${marketplace}: ${err.message}`);
-        logs.push({
-          category: nodeInfo.name,
-          marketplace,
-          status: 'FAILED',
-          message: err.message,
-        });
+        try {
+          const data = await scraperPost('/get-asins', {
+            category_urls: catBatch,
+            marketplace: config.mpCode,
+            max_items: maxPerCategory || 0,
+          });
+
+          const found = data.asins || [];
+          for (const item of found) {
+            collectedAsins.push({
+              asin: item.asin,
+              title: item.title || '',
+              category: item.category || '',
+              category_path: item.category_path || '',
+              source_marketplace: marketplace,
+            });
+          }
+
+          // Replace PROCESSING logs for this batch with per-category SUCCESS logs
+          // (remove the PROCESSING placeholders we just added and push SUCCESS entries)
+          for (let li = logs.length - catBatch.length; li < logs.length; li++) {
+            logs[li] = { ...logs[li], status: 'SUCCESS', message: `Found ASINs` };
+          }
+          // Annotate with actual counts where possible (best effort per category)
+          const countByCategory = {};
+          for (const item of found) {
+            const key = item.category || '';
+            countByCategory[key] = (countByCategory[key] || 0) + 1;
+          }
+          for (let li = logs.length - catBatch.length; li < logs.length; li++) {
+            const catName = logs[li].category;
+            const cnt = countByCategory[catName] ?? found.length;
+            logs[li].message = `Found ${cnt} ASIN${cnt !== 1 ? 's' : ''}`;
+          }
+          console.log(`[Collector] ${marketplace} batch ${batchNum}: ${found.length} ASINs`);
+        } catch (err) {
+          console.error(`[Collector] ${marketplace} batch ${batchNum} failed: ${err.message}`);
+          for (let li = logs.length - catBatch.length; li < logs.length; li++) {
+            logs[li] = { ...logs[li], status: 'FAILED', message: err.message };
+          }
+        }
+
+        processed += catBatch.length;
+        updateState('RUNNING', null);
       }
-
-      processed++;
-      updateState('RUNNING', null);
-      await delay(500);
     }
 
     collectRuns.set(collectRunId, {
       ...collectRuns.get(collectRunId),
       status: 'COMPLETED',
-      processed,
+      processed: total,
       total,
       logs,
       asins: collectedAsins,
@@ -397,148 +341,6 @@ async function runAsinCollectionAgent(collectRunId, selectedNodeIds, marketplace
       error: err.message,
     });
   }
-}
-
-// ─── Fallback Scraper using apify~web-scraper ─────────────────────────────────
-
-async function scrapeSellerPage(sellerUrl) {
-  const pageFunction = `
-    async function pageFunction(context) {
-      const $ = context.jQuery;
-
-      const getFromTable = (...labels) => {
-        for (const label of labels) {
-          const row = $('tr').filter((i, el) =>
-            $(el).find('td, th').first().text().trim().toLowerCase().includes(label.toLowerCase())
-          );
-          if (row.length) {
-            const val = row.find('td').last().text().trim();
-            if (val) return val;
-          }
-        }
-        return '';
-      };
-
-      const getFromDt = (...labels) => {
-        for (const label of labels) {
-          const dt = $('dt').filter((i, el) => $(el).text().trim().toLowerCase().includes(label.toLowerCase()));
-          if (dt.length) {
-            const val = dt.next('dd').text().trim();
-            if (val) return val;
-          }
-        }
-        return '';
-      };
-
-      const getFromARow = (...labels) => {
-        for (const label of labels) {
-          let found = '';
-          $('.a-row, .a-section > div').each((i, row) => {
-            const text = $(row).text();
-            for (const lbl of labels) {
-              if (text.toLowerCase().includes(lbl.toLowerCase())) {
-                const children = $(row).find('span, div, td').toArray();
-                for (let j = 0; j < children.length; j++) {
-                  const childText = $(children[j]).text().trim();
-                  if (childText.toLowerCase().includes(lbl.toLowerCase()) && children[j+1]) {
-                    const val = $(children[j+1]).text().trim();
-                    if (val && !val.toLowerCase().includes(lbl.toLowerCase())) {
-                      found = val;
-                      return false;
-                    }
-                  }
-                }
-              }
-            }
-          });
-          if (found) return found;
-        }
-        return '';
-      };
-
-      const getFromText = (...labels) => {
-        const bodyText = $('body').text();
-        for (const label of labels) {
-          const idx = bodyText.toLowerCase().indexOf(label.toLowerCase());
-          if (idx >= 0) {
-            const after = bodyText.slice(idx + label.length).replace(/^[:\\s]+/, '').trim();
-            const val = after.split('\\n')[0].split(/\\s{4,}/)[0].trim();
-            if (val && val.length > 0 && val.length < 200) return val;
-          }
-        }
-        return '';
-      };
-
-      const get = (...labels) =>
-        getFromTable(...labels) || getFromDt(...labels) || getFromARow(...labels) || getFromText(...labels);
-
-      const sellerName = $('#sellerName, #seller-name, [data-seller-name], h1.a-size-large, h1').first().text().trim();
-      const rating = $('[data-feedback-rating-value]').first().attr('data-feedback-rating-value')
-        || get('Rating', 'Valoración');
-
-      const debugRows = [];
-      $('tr').each((i, el) => {
-        const cells = $(el).find('td, th').map((j, c) => $(c).text().trim()).get().filter(Boolean);
-        if (cells.length >= 2) debugRows.push(cells);
-      });
-      const debugDt = $('dt').map((i, el) => ({ dt: $(el).text().trim(), dd: $(el).next('dd').text().trim() })).get();
-      const pageText = $('body').text().replace(/\\s+/g, ' ').slice(0, 8000);
-
-      return {
-        businessName: get('Business Name', 'Trading name', 'Legal name', 'Nombre comercial', 'Razón social') || sellerName,
-        email: get('Email', 'E-mail', 'Correo electrónico', 'Electronic address'),
-        phone: get('Phone', 'Telephone', 'Teléfono', 'Phone number', 'Número de teléfono'),
-        customerServiceAddress: get('Customer service address', 'Dirección de atención al cliente', 'Customer service'),
-        businessAddress: get('Business address', 'Registered business address', 'Dirección de la empresa', 'Dirección'),
-        vatNumber: get('VAT number', 'VAT', 'Número de IVA', 'Número de identificación fiscal', 'Tax ID', 'CIF', 'NIF'),
-        companyRegistration: get('Company registration', 'Registration number', 'Número de registro', 'Companies House', 'Registro mercantil'),
-        sellerRating: rating,
-        sellerName,
-        _debug: { rows: debugRows.slice(0, 30), dtdd: debugDt.slice(0, 20), textSnippet: pageText },
-      };
-    }
-  `;
-
-  const run = await apifyRunActor(ACTOR_FALLBACK, {
-    startUrls: [{ url: sellerUrl }],
-    pageFunction,
-    proxyConfiguration: { useApifyProxy: true },
-  });
-
-  const data = await apifyWaitAndFetch(run.id);
-  const result = data[0] || {};
-  if (result._debug) {
-    console.log('[Scraper] Table rows found:', JSON.stringify(result._debug.rows));
-    console.log('[Scraper] DT/DD pairs found:', JSON.stringify(result._debug.dtdd));
-    console.log('[Scraper] Page text snippet:', result._debug.textSnippet?.slice(0, 2000));
-    delete result._debug;
-  }
-  return result;
-}
-
-// ─── Extract Seller Data ──────────────────────────────────────────────────────
-
-function extractSellerData(productData) {
-  if (!Array.isArray(productData) || productData.length === 0) return null;
-
-  const item = productData[0];
-  const s = item?.seller;
-  if (!s?.id) return null;
-
-  const address = Array.isArray(s.address) ? s.address.filter(Boolean).join(', ') : (s.address || '');
-  const rating = s.ratingLifetime?.starsOutOf5 || s.rating90Days?.starsOutOf5 || s.rating30Days?.starsOutOf5 || '';
-
-  return {
-    seller_id: s.id,
-    business_name: s.businessName || s.name || '',
-    email: s.email || '',
-    phone_number: s.phone || '',
-    customer_service_address: '',
-    business_address: address,
-    vat_number: s.VAT || s.vat || '',
-    company_registration: s.companyRegistration || s.registrationNumber || '',
-    seller_rating: rating ? String(rating) : '',
-  };
 }
 
 // ─── Main Seller Scrape Agent ─────────────────────────────────────────────────
@@ -561,96 +363,138 @@ async function runSellerScrapeAgent(runId, asins, marketplaces, options = {}, as
     });
   };
 
+  updateStatus('RUNNING', null);
+
   try {
-    for (const asin of asins) {
-      for (const marketplace of marketplaces) {
-        const config = MARKETPLACES[marketplace];
-        if (!config) {
+    for (const marketplace of marketplaces) {
+      const config = MARKETPLACES[marketplace];
+      if (!config) {
+        for (const asin of asins) {
           logs.push({ asin, marketplace, status: 'FAILED', message: `Unknown marketplace: ${marketplace}` });
           processed++;
-          continue;
+        }
+        continue;
+      }
+
+      // Build ASIN list with metadata
+      const asinList = asins.map(asin => {
+        const meta = asinMetadata[asin] || {};
+        return {
+          asin,
+          category: meta.category || '',
+          category_path: meta.category_path || '',
+        };
+      });
+
+      // Batch into groups of 5 — processed 2 at a time concurrently inside Python
+      // Timeout: 30 min per batch (5 ASINs ÷ 2 concurrent × worst-case ~40s = ~4 min worst case)
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < asinList.length; i += BATCH_SIZE) {
+        const batch = asinList.slice(i, i + BATCH_SIZE);
+
+        console.log(`\n[Agent] ${marketplace}: scraping ${batch.length} ASINs (batch ${Math.floor(i / BATCH_SIZE) + 1})`);
+        // Emit one PROCESSING log per ASIN so the feed shows real ASIN IDs, not "batch-N"
+        for (const asinItem of batch) {
+          logs.push({
+            asin: asinItem.asin,
+            marketplace,
+            status: 'PROCESSING',
+            message: `Fetching seller info...`,
+          });
+        }
+        runs.set(runId, { ...runs.get(runId), status: 'RUNNING', processed, total, logs: [...logs], results: [...results] });
+
+        // Fetch with retry — up to 2 extra attempts on transient TCP/network errors
+        let batchData = null;
+        let batchErr = null;
+        for (let batchAttempt = 0; batchAttempt <= 2; batchAttempt++) {
+          try {
+            batchData = await scraperPost('/scrape-from-asins', {
+              asins: batch,
+              marketplace: config.mpCode,
+            }, 1800000); // 30 min — covers 3 ASINs × worst-case proxy retries
+            batchErr = null;
+            break; // success
+          } catch (e) {
+            batchErr = e;
+            const isNetwork = /fetch failed|ECONNRESET|ECONNREFUSED|socket hang up/i.test(e.message);
+            if (isNetwork && batchAttempt < 2) {
+              console.warn(`[Agent] Batch network error (attempt ${batchAttempt + 1}/3), retrying in 5s: ${e.message}`);
+              await delay(5000);
+            } else {
+              break; // non-retryable or exhausted retries
+            }
+          }
         }
 
-        const meta = asinMetadata[asin] || {};
-        const productUrl = `https://www.${config.domain}/dp/${asin}`;
-        console.log(`\n[Agent] Processing ASIN: ${asin} on ${marketplace} → ${productUrl}`);
+        if (batchData) {
+          const items = batchData.results || [];
+          for (const item of items) {
+            const meta = asinMetadata[item.asin] || {};
 
-        updateStatus('RUNNING', { asin, marketplace, status: 'PENDING', message: 'Fetching product page...' });
+            // Map scraper status to human-readable error (only set if not success)
+            let errorLabel;
+            if (item.status !== 'success') {
+              const statusMap = {
+                no_seller_found: 'No 3rd-party seller',
+                amazon_sold:     'Sold by Amazon',
+                blocked_page:    'Proxy blocked',
+                captcha:         'CAPTCHA detected',
+                error:           item.error || 'Scrape error',
+              };
+              errorLabel = statusMap[item.status] || item.error || item.status || 'Unknown error';
+            }
 
-        try {
-          let sellerData = null;
-
-          try {
-            const productRun = await apifyRunActor(ACTOR_PRODUCT_SCRAPER, {
-              categoryOrProductUrls: [{ url: productUrl }],
-              proxyCountry: config.country,
-              maxItems: 1,
-              scrapeSellers: true,
-            });
-
-            updateStatus('RUNNING', { asin, marketplace, status: 'PROCESSING', message: `Scraping product page...` });
-            const productData = await apifyWaitAndFetch(productRun.id);
-            sellerData = extractSellerData(productData);
-          } catch (scrapeErr) {
-            console.error(`[Agent] Scrape failed for ${asin}/${marketplace}: ${scrapeErr.message}`);
-            updateStatus('RUNNING', { asin, marketplace, status: 'PROCESSING', message: `Scrape failed: ${scrapeErr.message}` });
-          }
-
-          if (!sellerData) {
             const result = {
-              asin, marketplace,
-              category: meta.category || '',
-              category_path: meta.category_path || '',
-              seller_id: '', business_name: '', email: '', phone_number: '',
-              customer_service_address: '', business_address: '', vat_number: '',
-              company_registration: '', seller_rating: '',
+              asin: item.asin,
+              marketplace,
+              category: item.category || meta.category || '',
+              category_path: item.category_path || meta.category_path || '',
+              seller_id: item.seller_id || '',
+              business_name: item.business_name || '',
+              email: item.email || '',
+              phone_number: item.phone || item.phone_number || '',
+              customer_service_address: '',
+              business_address: item.address || item.business_address || item.raw_info || '',
+              vat_number: item.vat_number || '',
+              company_registration: '',
+              seller_rating: item.rating || '',
               scrape_timestamp: new Date().toISOString(),
-              error: 'No seller data found on product page',
+              error: errorLabel,
             };
             results.push(result);
-            logs.push({ asin, marketplace, status: 'FAILED', message: 'No seller data found' });
-            processed++;
-            updateStatus('RUNNING', { asin, marketplace, status: 'FAILED', message: 'No seller data found' });
-            continue;
+            logs.push({
+              asin: item.asin,
+              marketplace,
+              status: item.status === 'success' ? 'SUCCESS' : 'FAILED',
+              message: item.status === 'success'
+                ? `Seller: "${result.business_name || 'Unknown'}" extracted`
+                : (item.error || 'No data'),
+            });
           }
 
-          const result = {
-            asin,
-            marketplace,
-            category: meta.category || '',
-            category_path: meta.category_path || '',
-            ...sellerData,
-            scrape_timestamp: new Date().toISOString(),
-          };
+          processed += batch.length;
+          updateStatus('RUNNING', null);
+        } else {
+          // All retries exhausted
+          const errMsg = batchErr?.message || 'Unknown batch error';
+          console.error(`[Agent] Batch failed for ${marketplace} after retries: ${errMsg}`);
+          for (const { asin } of batch) {
+            results.push({
+              asin, marketplace,
+              category: asinMetadata[asin]?.category || '',
+              category_path: asinMetadata[asin]?.category_path || '',
+              error: errMsg,
+              scrape_timestamp: new Date().toISOString(),
+            });
+            logs.push({ asin, marketplace, status: 'FAILED', message: errMsg });
+            processed++;
+          }
+          updateStatus('RUNNING', null);
+        }
 
-          results.push(result);
-          logs.push({
-            asin,
-            marketplace,
-            status: 'SUCCESS',
-            message: `Seller: "${result.business_name || 'Unknown'}" extracted`,
-          });
-          processed++;
-          updateStatus('RUNNING', {
-            asin,
-            marketplace,
-            status: 'SUCCESS',
-            message: `Seller: "${result.business_name || 'Unknown'}" extracted`,
-          });
-
-          await delay(options.delay || 500);
-        } catch (err) {
-          console.error(`[Agent] Fatal error for ${asin}/${marketplace}: ${err.message}`);
-          results.push({
-            asin, marketplace,
-            category: meta.category || '',
-            category_path: meta.category_path || '',
-            error: err.message,
-            scrape_timestamp: new Date().toISOString(),
-          });
-          logs.push({ asin, marketplace, status: 'FAILED', message: err.message });
-          processed++;
-          updateStatus('RUNNING', { asin, marketplace, status: 'FAILED', message: err.message });
+        if (i + BATCH_SIZE < asinList.length) {
+          await delay(options.delay || 1000);
         }
       }
     }
@@ -658,7 +502,7 @@ async function runSellerScrapeAgent(runId, asins, marketplaces, options = {}, as
     runs.set(runId, {
       ...runs.get(runId),
       status: 'COMPLETED',
-      processed,
+      processed: total,
       total,
       logs,
       results,
@@ -675,31 +519,57 @@ async function runSellerScrapeAgent(runId, asins, marketplaces, options = {}, as
   }
 }
 
-// ─── CSV Builder ──────────────────────────────────────────────────────────────
+// ─── Excel Builder ────────────────────────────────────────────────────────────
 
-function buildCsv(results) {
-  const fields = [
-    'asin', 'marketplace', 'category', 'category_path',
-    'seller_id', 'business_name', 'email',
-    'phone_number', 'customer_service_address', 'business_address',
-    'vat_number', 'company_registration', 'seller_rating', 'scrape_timestamp',
-  ];
-  try {
-    const parser = new Parser({ fields });
-    return parser.parse(results.filter(r => !r.error));
-  } catch (e) {
-    return 'Error generating CSV: ' + e.message;
-  }
+const EXPORT_COLUMNS = [
+  { key: 'asin',                     label: 'ASIN',                     text: false, width: 12 },
+  { key: 'marketplace',              label: 'Marketplace',              text: false, width: 12 },
+  { key: 'category',                 label: 'Category',                 text: false, width: 20 },
+  { key: 'category_path',            label: 'Category Path',            text: false, width: 28 },
+  { key: 'seller_id',                label: 'Seller ID',                text: false, width: 16 },
+  { key: 'business_name',            label: 'Business Name',            text: false, width: 28 },
+  { key: 'email',                    label: 'Email',                    text: false, width: 30 },
+  { key: 'phone_number',             label: 'Phone Number',             text: true,  width: 20 },
+  { key: 'customer_service_address', label: 'Customer Service Address', text: false, width: 32 },
+  { key: 'business_address',         label: 'Business Address',         text: false, width: 40 },
+  { key: 'vat_number',               label: 'VAT Number',               text: true,  width: 20 },
+  { key: 'company_registration',     label: 'Company Registration',     text: true,  width: 22 },
+  { key: 'seller_rating',            label: 'Seller Rating',            text: false, width: 16 },
+  { key: 'scrape_timestamp',         label: 'Scraped At',               text: false, width: 22 },
+];
+
+function buildXlsx(results) {
+  const rows = results.filter(r => !r.error);
+
+  // Header row
+  const headerRow = EXPORT_COLUMNS.map(c => c.label);
+
+  // Data rows — force text: true columns to string type so Excel can't
+  // convert phone/VAT numbers to scientific notation
+  const dataRows = rows.map(r =>
+    EXPORT_COLUMNS.map(col => {
+      const val = String(r[col.key] ?? '');
+      return col.text ? { t: 's', v: val } : val;   // t:'s' = Excel text cell
+    })
+  );
+
+  const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
+
+  // Column widths
+  ws['!cols'] = EXPORT_COLUMNS.map(c => ({ wch: c.width }));
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Seller Data');
+
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
 
-// Browse nodes list
 app.get('/api/browse-nodes', (req, res) => {
   res.json(browseNodes);
 });
 
-// Start ASIN collection
 app.post('/api/collect-asins', async (req, res) => {
   const { selectedNodeIds, marketplaces, maxPerCategory = 50 } = req.body;
 
@@ -724,7 +594,6 @@ app.post('/api/collect-asins', async (req, res) => {
   res.status(202).json({ collectRunId, status: 'RUNNING', total, estimatedSeconds: total * 30 });
 });
 
-// Poll ASIN collection status
 app.get('/api/collect-asins/:collectRunId/status', (req, res) => {
   const run = collectRuns.get(req.params.collectRunId);
   if (!run) return res.status(404).json({ error: 'Collection run not found' });
@@ -739,7 +608,6 @@ app.get('/api/collect-asins/:collectRunId/status', (req, res) => {
   });
 });
 
-// Start seller scrape
 app.post('/api/scrape', async (req, res) => {
   const { asins, marketplaces, options, asinMetadata } = req.body;
 
@@ -770,57 +638,22 @@ app.get('/api/scrape/:runId/results', (req, res) => {
 app.get('/api/scrape/:runId/download', (req, res) => {
   const run = runs.get(req.params.runId);
   if (!run) return res.status(404).json({ error: 'Run not found' });
-  const csv = buildCsv(run.results || []);
+  const buffer = buildXlsx(run.results || []);
   const timestamp = new Date().toISOString().split('T')[0];
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="amazon_seller_info_${timestamp}.csv"`);
-  res.send(csv);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="amazon_seller_info_${timestamp}.xlsx"`);
+  res.send(buffer);
 });
 
-// ─── Debug endpoints ──────────────────────────────────────────────────────────
+// ─── Health / Debug ───────────────────────────────────────────────────────────
 
-app.get('/api/debug/seller-page', async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ error: 'url query param required' });
-
-  const pageFunction = `
-    async function pageFunction(context) {
-      const $ = context.jQuery;
-      const rows = [];
-      $('tr').each((i, el) => {
-        const cells = $(el).find('td, th').map((j, c) => $(c).text().trim()).get();
-        if (cells.some(c => c.length > 0)) rows.push(cells);
-      });
-      const dtdd = [];
-      $('dt').each((i, el) => {
-        dtdd.push({ dt: $(el).text().trim(), dd: $(el).next('dd').text().trim() });
-      });
-      const allText = $('body').text().replace(/\\s+/g, ' ').slice(0, 5000);
-      const bodyHtml = $('[class*="business"], [class*="seller-info"], [id*="seller"], [class*="about"]').map((i,el) => ({cls: el.className, html: $(el).html()?.slice(0,500)})).get();
-      return { rows, dtdd, allText, bodyHtml, title: $('title').text() };
-    }
-  `;
-
+app.get('/api/health', async (req, res) => {
   try {
-    const run = await apifyRunActor(ACTOR_FALLBACK, {
-      startUrls: [{ url }],
-      pageFunction,
-      proxyConfiguration: { useApifyProxy: true },
-    });
-    const data = await apifyWaitAndFetch(run.id);
-    res.json(data[0] || {});
+    const r = await fetch(`${SCRAPER_URL}/health`, { headers: { 'x-api-key': SCRAPER_API_KEY } });
+    const data = await r.json();
+    res.json({ server: 'ok', scraper: data });
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/debug/apify', async (req, res) => {
-  try {
-    const response = await fetch(`${APIFY_BASE_URL}/users/me?token=${APIFY_API_TOKEN}`);
-    const data = await response.json();
-    res.json({ ok: response.ok, status: response.status, user: data?.data?.username, plan: data?.data?.plan?.monthlyUsageCreditsUsd });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ server: 'ok', scraper: 'DOWN', error: err.message });
   }
 });
 

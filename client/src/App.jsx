@@ -320,7 +320,7 @@ function App() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `amazon_seller_info_${new Date().toISOString().split('T')[0]}.csv`;
+      a.download = `amazon_seller_info_${new Date().toISOString().split('T')[0]}.xlsx`;
       a.click();
       window.URL.revokeObjectURL(url);
     } catch (err) {
@@ -391,7 +391,8 @@ function App() {
     return [...seen.values()];
   }, [collectStatus?.logs]);
 
-  const isCollectDone = collectStatus?.status === 'COMPLETED' && collectedAsins.length > 0;
+  // Show completed state whenever we have a terminal status — even with 0 ASINs
+  const isCollectDone = !isCollecting && (collectStatus?.status === 'COMPLETED' || collectStatus?.status === 'ERROR');
   const isScrapeRunning = isRunning;
   const isScrapeDone = status?.status === 'COMPLETED' && results.length > 0;
 
@@ -620,50 +621,102 @@ function App() {
                 </div>
               )}
 
-              {isCollectDone && !isCollecting && (
+              {isCollectDone && (
                 <div className="collection-results">
-                  <div className="collection-summary">
-                    <div className="collection-stat">
-                      <div className="collection-stat-value">{collectedAsins.length}</div>
-                      <div className="collection-stat-label">ASINs collected</div>
+                  {collectedAsins.length === 0 ? (
+                    /* ── Completed with 0 ASINs / ERROR ── */
+                    <div className="collection-empty-result">
+                      <div className="collection-summary">
+                        <div className="collection-stat">
+                          <div className="collection-stat-value" style={{color:'var(--status-error)'}}>0</div>
+                          <div className="collection-stat-label">ASINs collected</div>
+                        </div>
+                        <div className="collection-stat">
+                          <div className="collection-stat-value" style={{color:'var(--status-error)'}}>
+                            {collectStatus?.status === 'ERROR' ? 'ERROR' : 'FAILED'}
+                          </div>
+                          <div className="collection-stat-label">Status</div>
+                        </div>
+                      </div>
+                      <div style={{padding:'12px 16px',background:'rgba(255,80,80,0.08)',borderRadius:8,margin:'12px 0',borderLeft:'3px solid var(--status-error)'}}>
+                        <div style={{fontWeight:600,marginBottom:6,color:'var(--status-error)'}}>
+                          {collectStatus?.status === 'ERROR' ? '⚠ Collection crashed' : '⚠ No ASINs found'}
+                        </div>
+                        {collectStatus?.error && (
+                          <div style={{fontSize:12,color:'var(--text-secondary)',marginBottom:8}}>{collectStatus.error}</div>
+                        )}
+                        <div style={{fontSize:12,color:'var(--text-secondary)'}}>
+                          Check the logs below for details. Possible causes: proxy blocked, Amazon anti-bot, or no products found for selected categories.
+                        </div>
+                      </div>
+                      {collectDedupedLogs.length > 0 && (
+                        <div className="log-feed" style={{maxHeight:300,overflowY:'auto'}}>
+                          {collectDedupedLogs.map((log, i) => (
+                            <div key={i} className={`log-row ${log.status?.toLowerCase()}`}>
+                              <div className="log-status">
+                                {log.status === 'SUCCESS' ? <span style={{color:'var(--status-success)',fontSize:14}}>✓</span> :
+                                 log.status === 'FAILED' ? <span style={{color:'var(--status-error)',fontSize:14}}>✕</span> :
+                                 <span style={{color:'var(--text-muted)',fontSize:14}}>○</span>}
+                              </div>
+                              <div className="log-content">
+                                <div className="log-main">
+                                  <span className="log-asin">{log.category}</span>
+                                  {log.marketplace && <span className="log-marketplace-badge">{log.marketplace}</span>}
+                                </div>
+                                <div className="log-meta">{log.message}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    <div className="collection-stat">
-                      <div className="collection-stat-value">{[...new Set(collectedAsins.map(a => a.category))].length}</div>
-                      <div className="collection-stat-label">Categories</div>
-                    </div>
-                    <div className="collection-stat">
-                      <div className="collection-stat-value">{[...new Set(collectedAsins.map(a => a.source_marketplace))].length}</div>
-                      <div className="collection-stat-label">Marketplaces</div>
-                    </div>
-                    <button className="btn-use-asins" onClick={useCollectedAsins}>
-                      Use these ASINs → Scrape Sellers
-                    </button>
-                  </div>
+                  ) : (
+                    /* ── Completed with results ── */
+                    <>
+                      <div className="collection-summary">
+                        <div className="collection-stat">
+                          <div className="collection-stat-value">{collectedAsins.length}</div>
+                          <div className="collection-stat-label">ASINs collected</div>
+                        </div>
+                        <div className="collection-stat">
+                          <div className="collection-stat-value">{[...new Set(collectedAsins.map(a => a.category))].length}</div>
+                          <div className="collection-stat-label">Categories</div>
+                        </div>
+                        <div className="collection-stat">
+                          <div className="collection-stat-value">{[...new Set(collectedAsins.map(a => a.source_marketplace))].length}</div>
+                          <div className="collection-stat-label">Marketplaces</div>
+                        </div>
+                        <button className="btn-use-asins" onClick={useCollectedAsins}>
+                          Use these ASINs → Scrape Sellers
+                        </button>
+                      </div>
 
-                  <div className="collected-asin-table-wrapper">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>ASIN</th>
-                          <th>Category</th>
-                          <th>Marketplace</th>
-                          <th>Product Title</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {collectedAsins.map((a, i) => (
-                          <tr key={i}>
-                            <td className="monospace cell-asin">{a.asin}</td>
-                            <td>{a.category}</td>
-                            <td>
-                              <div className="marketplace-badge">{MP_FLAGS[a.source_marketplace]} {a.source_marketplace}</div>
-                            </td>
-                            <td className="cell-address">{a.title || '-'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                      <div className="collected-asin-table-wrapper">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              <th>ASIN</th>
+                              <th>Category</th>
+                              <th>Marketplace</th>
+                              <th>Product Title</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {collectedAsins.map((a, i) => (
+                              <tr key={i}>
+                                <td className="monospace cell-asin">{a.asin}</td>
+                                <td>{a.category}</td>
+                                <td>
+                                  <div className="marketplace-badge">{MP_FLAGS[a.source_marketplace]} {a.source_marketplace}</div>
+                                </td>
+                                <td className="cell-address">{a.title || '-'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
             </main>
