@@ -18,6 +18,7 @@ from human_behaviour import (
     micro_delay,
     simulate_scroll,
     simulate_reading_pause,
+    simulate_micro_movements,
 )
 
 
@@ -58,7 +59,6 @@ BROWSER_LAUNCH_ARGS = [
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--disable-blink-features=AutomationControlled",
-    "--disable-extensions",
     "--no-first-run",
     "--disable-default-apps",
     "--disable-infobars",
@@ -66,11 +66,21 @@ BROWSER_LAUNCH_ARGS = [
     # RAM-saving flags — critical on Railway where each Chrome context costs ~300MB
     "--disable-gpu",
     "--disable-software-rasterizer",
-    "--disable-dev-shm-usage",
     "--disable-background-networking",
     "--disable-translate",
     "--hide-scrollbars",
     "--mute-audio",
+    # Stealth: remove crash reporting / telemetry beacons that fingerprint the client
+    "--disable-crash-reporter",
+    "--disable-domain-reliability",
+    "--no-pings",
+    "--disable-client-side-phishing-detection",
+    # Stealth: suppress feature flags that real users never enable
+    "--disable-features=ChromeWhatsNewUI,CrashReporting,CalculateNativeWinOcclusion",
+    # Stealth: force consistent device pixel ratio
+    "--force-device-scale-factor=1",
+    # Stealth: suppress IPC flooding protection (changes timing fingerprint)
+    "--disable-ipc-flooding-protection",
 ]
 
 # Amazon "sold by Amazon" signals — all EU/US/CA languages (check as lowercase)
@@ -201,11 +211,10 @@ async def create_stealth_context(
 
     if use_proxy:
         proxy_dict = get_proxy()
-        playwright_proxy = {
-            "server":   proxy_dict["server"],
-            "username": proxy_dict["username"],
-            "password": proxy_dict["password"],
-        }
+        playwright_proxy = {"server": proxy_dict["server"]}
+        if proxy_dict.get("username"):
+            playwright_proxy["username"] = proxy_dict["username"]
+            playwright_proxy["password"] = proxy_dict["password"]
         print(f"  [PROXY] Using {proxy_dict['server']}")
     else:
         print("  [INFO] Using direct connection (no proxy)")
@@ -236,6 +245,10 @@ async def create_stealth_context(
 
     # Short language code for navigator.languages array (e.g. "de-DE" → "de")
     lang_short = locale.split("-")[0]
+
+    # Precomputed values injected into the JS init script
+    platform = "MacIntel" if "Macintosh" in ua else "Win32"
+    canvas_seed = random.randint(1_000_000, 9_999_999)
 
     context = await browser.new_context(
         proxy=playwright_proxy,
@@ -416,6 +429,150 @@ async def create_stealth_context(
                     addEventListener: () => {{}},
                 }});
             }}
+        }} catch (_) {{}}
+
+        // ── 14. Canvas fingerprint noise ──
+        // Every headless session produces an identical canvas hash without this.
+        // LCG seeded per-session so the noise pattern is unique but stable within a session.
+        try {{
+            let _lcg = {canvas_seed};
+            function _lcgNext() {{ _lcg = (Math.imul(_lcg, 1664525) + 1013904223) | 0; return _lcg >>> 0; }}
+
+            const _toDataURL   = HTMLCanvasElement.prototype.toDataURL;
+            const _toBlob      = HTMLCanvasElement.prototype.toBlob;
+            const _getImgData  = CanvasRenderingContext2D.prototype.getImageData;
+
+            function _noiseCanvas(canvas) {{
+                if (!canvas || canvas.width === 0 || canvas.height === 0) return;
+                try {{
+                    const ctx = canvas.getContext && canvas.getContext('2d');
+                    if (!ctx) return;
+                    const imgData = _getImgData.call(ctx, 0, 0, canvas.width, canvas.height);
+                    const d = imgData.data;
+                    for (let i = 0; i < d.length; i += 4) {{
+                        if ((_lcgNext() & 0xFFF) === 0) d[i] = d[i] < 255 ? d[i] + 1 : 254;
+                    }}
+                    ctx.putImageData(imgData, 0, 0);
+                }} catch (_) {{}}
+            }}
+
+            HTMLCanvasElement.prototype.toDataURL = function(type, quality) {{
+                _noiseCanvas(this);
+                return _toDataURL.call(this, type, quality);
+            }};
+            HTMLCanvasElement.prototype.toDataURL.toString = () => 'function toDataURL() {{ [native code] }}';
+
+            HTMLCanvasElement.prototype.toBlob = function(cb, type, quality) {{
+                _noiseCanvas(this);
+                return _toBlob.call(this, cb, type, quality);
+            }};
+            HTMLCanvasElement.prototype.toBlob.toString = () => 'function toBlob() {{ [native code] }}';
+        }} catch (_) {{}}
+
+        // ── 15. AudioContext fingerprint noise ──
+        try {{
+            const _origGetChannelData = AudioBuffer.prototype.getChannelData;
+            AudioBuffer.prototype.getChannelData = function(channel) {{
+                const arr = _origGetChannelData.call(this, channel);
+                const noise = 1.2e-9;
+                for (let i = 0; i < arr.length; i += 100) {{
+                    arr[i] = arr[i] + (Math.random() * noise - noise * 0.5);
+                }}
+                return arr;
+            }};
+            AudioBuffer.prototype.getChannelData.toString = () => 'function getChannelData() {{ [native code] }}';
+        }} catch (_) {{}}
+
+        // ── 16. WebRTC IP leak prevention ──
+        // Without this patch, Chrome WebRTC will gather ICE candidates and reveal
+        // the real machine IP even when a proxy is set, allowing de-anonymisation.
+        try {{
+            const _OrigRTC = window.RTCPeerConnection;
+            if (_OrigRTC) {{
+                function _SafeRTC(config, constraints) {{
+                    const safe = config ? Object.assign({{}}, config, {{ iceServers: [] }}) : {{}};
+                    return new _OrigRTC(safe, constraints);
+                }}
+                _SafeRTC.prototype = _OrigRTC.prototype;
+                try {{ Object.defineProperties(_SafeRTC, Object.getOwnPropertyDescriptors(_OrigRTC)); }} catch(_) {{}}
+                window.RTCPeerConnection = _SafeRTC;
+            }}
+        }} catch (_) {{}}
+
+        // ── 17. navigator consistency (belt+suspenders over playwright-stealth) ──
+        try {{ Object.defineProperty(navigator, 'platform',         {{ get: () => '{platform}',  configurable: true }}); }} catch (_) {{}}
+        try {{ Object.defineProperty(navigator, 'vendor',           {{ get: () => 'Google Inc.', configurable: true }}); }} catch (_) {{}}
+        try {{ Object.defineProperty(navigator, 'maxTouchPoints',   {{ get: () => 0,             configurable: true }}); }} catch (_) {{}}
+        try {{ Object.defineProperty(navigator, 'doNotTrack',       {{ get: () => null,          configurable: true }}); }} catch (_) {{}}
+        try {{ Object.defineProperty(navigator, 'pdfViewerEnabled', {{ get: () => true,          configurable: true }}); }} catch (_) {{}}
+
+        // ── 18. Document visibility — headless pages report as hidden/background ──
+        try {{ Object.defineProperty(document, 'hidden',          {{ get: () => false,    configurable: true }}); }} catch (_) {{}}
+        try {{ Object.defineProperty(document, 'visibilityState', {{ get: () => 'visible', configurable: true }}); }} catch (_) {{}}
+        try {{ document.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true); }} catch (_) {{}}
+
+        // ── 19. History length — length=1 (direct URL) is a strong bot signal ──
+        try {{
+            const _histLen = Math.floor(Math.random() * 5) + 3;
+            Object.defineProperty(history, 'length', {{ get: () => _histLen, configurable: true }});
+        }} catch (_) {{}}
+
+        // ── 20. CSS matchMedia — headless returns wrong values for hover/pointer ──
+        // Sites detect bots via matchMedia('(hover: hover)') === false.
+        try {{
+            const _origMM = window.matchMedia ? window.matchMedia.bind(window) : null;
+            window.matchMedia = function(query) {{
+                const q = (query || '').toLowerCase().replace(/[\\s]+/g, '');
+                const _mk = (m) => ({{
+                    matches: m, media: query, onchange: null,
+                    addListener: () => {{}}, removeListener: () => {{}},
+                    addEventListener: () => {{}}, removeEventListener: () => {{}},
+                    dispatchEvent: () => false,
+                }});
+                if (q.includes('hover:hover'))                     return _mk(true);
+                if (q.includes('hover:none'))                      return _mk(false);
+                if (q.includes('pointer:fine'))                    return _mk(true);
+                if (q.includes('pointer:coarse'))                  return _mk(false);
+                if (q.includes('prefers-reduced-motion:reduce'))   return _mk(false);
+                if (q.includes('prefers-reduced-motion:no-preference')) return _mk(true);
+                if (q.includes('prefers-color-scheme:dark'))       return _mk(false);
+                if (q.includes('prefers-color-scheme:light'))      return _mk(true);
+                if (q.includes('any-hover:hover'))                 return _mk(true);
+                if (q.includes('any-pointer:fine'))                return _mk(true);
+                try {{ return _origMM ? _origMM(query) : _mk(false); }} catch (_) {{ return _mk(false); }}
+            }};
+        }} catch (_) {{}}
+
+        // ── 21. Speech synthesis stub ──
+        try {{
+            if (!window.speechSynthesis) {{
+                Object.defineProperty(window, 'speechSynthesis', {{
+                    get: () => ({{
+                        speak: () => {{}}, cancel: () => {{}}, pause: () => {{}}, resume: () => {{}},
+                        getVoices: () => [], speaking: false, pending: false, paused: false,
+                        addEventListener: () => {{}}, removeEventListener: () => {{}},
+                    }}),
+                }});
+            }}
+        }} catch (_) {{}}
+
+        // ── 22. Clean up known automation artifact globals ──
+        try {{
+            ['__selenium_unwrapped', '__webdriver_script_fn', '__fxdriver_unwrapped',
+             '_phantom', '__nightmare', 'callPhantom', '__webdriver_evaluate',
+             '__selenium_evaluate', '__webdriverFunc', 'domAutomation',
+             'domAutomationController'].forEach(k => {{
+                try {{ if (window[k] !== undefined) delete window[k]; }} catch (_) {{}}
+            }});
+        }} catch (_) {{}}
+
+        // ── 23. Error.stack — some detectors scan for 'HeadlessChrome' in traces ──
+        try {{
+            const _origPST = Error.prepareStackTrace;
+            Error.prepareStackTrace = function(err, stack) {{
+                const r = _origPST ? _origPST(err, stack) : String(stack);
+                return typeof r === 'string' ? r.replace(/HeadlessChrome/g, 'Chrome') : r;
+            }};
         }} catch (_) {{}}
     """)
 

@@ -18,5 +18,7 @@ build/
 # Cookies (may contain session data)
 cookies/
 
-# Debug scripts
+# Debug / test scripts
 debug_seller.py
+test_*.py
+test_results.json
