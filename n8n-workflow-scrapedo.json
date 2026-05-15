@@ -1,54 +1,46 @@
 {
-  "name": "Amazon Seller Scraper — Scrape.do + Custom API",
+  "name": "Amazon Seller Scraper — Zyte + Custom API",
   "nodes": [
     {
-      "parameters": {},
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
       "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560001",
-      "name": "Start",
-      "type": "n8n-nodes-base.manualTrigger",
-      "typeVersion": 1,
-      "position": [240, 300]
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "amazon-scraper-telegram-001",
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format: scrape <keywords> <MARKETPLACE> <max>\n// Examples:  scrape furniture ES 20\n//            scrape power tools DE 50\n\nconst msg    = $json.message?.text || '';\nconst chatId = String($json.message?.chat?.id || '');\nconst clean  = msg.replace(/^\\/?(scrape)\\s*/i, '').trim();\n\nconst VALID_MP = ['es','de','fr','it','co.uk','com','ca','mx'];\nconst tokens   = clean.split(/\\s+/);\n\nlet maxPerKeyword = '50';\nlet end = tokens.length;\nif (end > 0 && /^\\d+$/.test(tokens[end - 1])) { maxPerKeyword = tokens[end - 1]; end--; }\n\nlet marketplace = 'es';\nif (end > 0 && VALID_MP.includes(tokens[end - 1].toLowerCase())) { marketplace = tokens[end - 1].toLowerCase(); end--; }\n\nconst keywordRaw = tokens.slice(0, end).join(' ');\nconst keywords   = keywordRaw.includes(',') ? keywordRaw.split(',').map(k => k.trim()).filter(Boolean).join(',') : keywordRaw.trim();\n\nif (!keywords) throw new Error('Format: scrape <keywords> <marketplace> <max>  e.g.  scrape furniture ES 20');\n\nreturn [{ json: { keywords, marketplace, maxPerKeyword, chatId } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560000",
+      "name": "Parse Telegram Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
     },
     {
       "parameters": {
         "assignments": {
           "assignments": [
-            {
-              "id": "cfg-01",
-              "name": "scrapeDoToken",
-              "value": "60337f3075804f778fd03112fb1e4c5caf0bdb40c4b",
-              "type": "string"
-            },
-            {
-              "id": "cfg-02",
-              "name": "marketplace",
-              "value": "es",
-              "type": "string"
-            },
-            {
-              "id": "cfg-03",
-              "name": "keywords",
-              "value": "furniture,electronics,kitchen tools",
-              "type": "string"
-            },
-            {
-              "id": "cfg-04",
-              "name": "maxPerKeyword",
-              "value": "50",
-              "type": "string"
-            },
-            {
-              "id": "cfg-05",
-              "name": "scraperUrl",
-              "value": "http://localhost:8080",
-              "type": "string"
-            },
-            {
-              "id": "cfg-06",
-              "name": "scraperApiKey",
-              "value": "insider7-ResProx04",
-              "type": "string"
-            }
+            { "id": "cfg-01", "name": "keywords",      "value": "={{ $json.keywords }}",            "type": "string" },
+            { "id": "cfg-02", "name": "marketplace",   "value": "={{ $json.marketplace }}",          "type": "string" },
+            { "id": "cfg-03", "name": "maxPerKeyword", "value": "={{ $json.maxPerKeyword || '50' }}", "type": "string" },
+            { "id": "cfg-04", "name": "zyteApiKey",    "value": "4e4bc97062b94f0cb1c01e16575082d6",  "type": "string" },
+            { "id": "cfg-05", "name": "scraperUrl",    "value": "http://127.0.0.1:8080",              "type": "string" },
+            { "id": "cfg-06", "name": "scraperApiKey", "value": "insider7-ResProx04",                "type": "string" },
+            { "id": "cfg-07", "name": "chatId",        "value": "={{ $json.chatId }}",               "type": "string" }
           ]
         },
         "options": {}
@@ -57,87 +49,175 @@
       "name": "Config",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [480, 300]
-    },
-    {
-      "parameters": {
-        "jsCode": "// ── Step 1: Collect ASINs from Amazon search pages via scrape.do ─────────────────────\n// API: http://api.scrape.do/?url={encoded}&token={tok}&super=true&regionalGeoCode=europe\nconst cfg  = $input.first().json;\nconst tok  = cfg.scrapeDoToken;\nconst mp   = cfg.marketplace;\nconst kwds = cfg.keywords.split(',').map(k => k.trim()).filter(Boolean);\nconst maxN = parseInt(cfg.maxPerKeyword) || 50;\n\nconst DOMAINS = {\n  'es':'amazon.es', 'de':'amazon.de', 'fr':'amazon.fr', 'it':'amazon.it',\n  'co.uk':'amazon.co.uk', 'com':'amazon.com', 'ca':'amazon.ca', 'mx':'amazon.com.mx'\n};\n// scrape.do regionalGeoCode values for search API\nconst GEO_REGION = {\n  'es':'europe', 'de':'europe', 'fr':'europe', 'it':'europe', 'co.uk':'europe',\n  'com':'north_america', 'ca':'north_america', 'mx':'latin_america'\n};\n// scrape.do geocode values for PDP plugin\nconst GEO_CODE = {\n  'es':'es', 'de':'de', 'fr':'fr', 'it':'it',\n  'co.uk':'gb', 'com':'us', 'ca':'ca', 'mx':'mx'\n};\n// Default zipcodes required by PDP plugin per marketplace\nconst ZIPCODE = {\n  'es':'28001', 'de':'10115', 'fr':'75001', 'it':'00187',\n  'co.uk':'SW1A1AA', 'com':'10001', 'ca':'M5V3A8', 'mx':'06600'\n};\nconst dom     = DOMAINS[mp]    || 'amazon.es';\nconst geoReg  = GEO_REGION[mp] || 'europe';\nconst geoCode = GEO_CODE[mp]   || 'es';\nconst zipcode = ZIPCODE[mp]    || '28001';\nconst lang    = mp !== 'co.uk' ? '&language=en' : '';\n\nconst seen = new Set();\nconst out  = [];\n\nfor (const kw of kwds) {\n  const searchUrl = `https://www.${dom}/s?k=${encodeURIComponent(kw)}${lang}`;\n  const qs = new URLSearchParams({\n    url:             searchUrl,\n    token:           tok,\n    super:           'true',\n    regionalGeoCode: geoReg,\n  }).toString();\n\n  console.log(`[ASIN] keyword=${kw}  url=${searchUrl}`);\n\n  try {\n    const html  = await this.helpers.httpRequest({ method: 'GET', url: `http://api.scrape.do/?${qs}` });\n    const str   = typeof html === 'string' ? html : JSON.stringify(html);\n    const parts = str.split('data-asin=');\n    let cnt = 0;\n\n    for (let i = 1; i < parts.length && cnt < maxN; i++) {\n      const asin = parts[i].slice(1, 11);\n      if (/^[A-Z0-9]{10}$/.test(asin) && !seen.has(asin)) {\n        seen.add(asin);\n        out.push({ asin, keyword: kw, marketplace: mp, domain: dom, token: tok, geoCode, zipcode, scraperUrl: cfg.scraperUrl, scraperApiKey: cfg.scraperApiKey });\n        cnt++;\n      }\n    }\n    console.log(`[ASIN] ${cnt} found for \"${kw}\"`);\n  } catch (e) {\n    console.error(`[ASIN] Failed for \"${kw}\": ${e.message}`);\n  }\n}\n\nconsole.log(`[ASIN] Total unique ASINs: ${out.length}`);\nreturn out.map(r => ({ json: r }));",
-        "mode": "runOnceForAllItems"
-      },
-      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560003",
-      "name": "1 — Collect ASINs (Scrape.do Search)",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
       "position": [720, 300]
     },
     {
       "parameters": {
-        "jsCode": "// ── Step 2: Filter Amazon-sold products via scrape.do PDP plugin ─────────────────────\n// PDP plugin: https://api.scrape.do/plugin/amazon/pdp\n// Required params: token, asin, geocode, zipcode\n// Returns structured JSON — we only use sold_by to detect Amazon-sold items.\n// Non-Amazon ASINs are passed to our custom scraper in step 3.\nconst items   = $input.all();\nconst results = [];\n\nconsole.log(`[PDP] Filtering ${items.length} ASINs for Amazon-sold...`);\n\nfor (const it of items) {\n  const { asin, marketplace: mp, domain: dom, token: tok, geoCode, zipcode, scraperUrl, scraperApiKey } = it.json;\n\n  const qs = new URLSearchParams({\n    token:   tok,\n    asin:    asin,\n    geocode: geoCode,\n    zipcode: zipcode,\n  }).toString();\n\n  console.log(`[PDP] ASIN: ${asin}  geocode=${geoCode}  zipcode=${zipcode}`);\n\n  try {\n    let data = await this.helpers.httpRequest({\n      method: 'GET',\n      url: `https://api.scrape.do/plugin/amazon/pdp?${qs}`,\n    });\n\n    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (_) {} }\n\n    const soldBy     = String(data.sold_by || data.soldBy || data.seller?.name || '').toLowerCase();\n    const amazonSold = soldBy.includes('amazon') || data.soldByAmazon === true;\n    const sellerName = data.sold_by || data.soldBy || 'unknown';\n    const productName = String(data.name || '').slice(0, 60);\n\n    if (amazonSold) {\n      console.log(`[PDP] ${asin} → sold by Amazon (\"${sellerName}\") — SKIP`);\n    } else if (data.error) {\n      console.warn(`[PDP] ${asin} → error: ${data.error} — passing through anyway`);\n      results.push({ json: { asin, seller_name: 'unknown', marketplace: mp, scraperUrl, scraperApiKey } });\n    } else {\n      console.log(`[PDP] ${asin} → 3P seller: \"${sellerName}\"  product: ${productName}`);\n      results.push({ json: { asin, seller_name: sellerName, marketplace: mp, scraperUrl, scraperApiKey } });\n    }\n\n  } catch (e) {\n    console.error(`[PDP] ${asin} failed: ${e.message} — passing through anyway`);\n    results.push({ json: { asin, seller_name: 'unknown', marketplace: mp, scraperUrl, scraperApiKey } });\n  }\n}\n\nconsole.log(`[PDP] ${results.length} non-Amazon ASINs to scrape`);\nreturn results;",
+        "jsCode": "// ── Collect ASINs via Zyte API ───────────────────────────────────────────────\n// IMPORTANT: Always returns ≥1 item so downstream nodes always execute.\n// If 0 ASINs found, returns a sentinel item with __noAsins:true so the\n// pipeline can send a proper Telegram error instead of silently stopping.\n\nconst cfg      = $input.first().json;\nconst key      = cfg.zyteApiKey;\nconst mp       = cfg.marketplace;\nconst kwds     = String(cfg.keywords).split(',').map(k => k.trim()).filter(Boolean);\nconst maxTotal = parseInt(cfg.maxPerKeyword) || 50;\n\nconst DOMAINS = { 'es':'amazon.es','de':'amazon.de','fr':'amazon.fr','it':'amazon.it','co.uk':'amazon.co.uk','com':'amazon.com','ca':'amazon.ca','mx':'amazon.com.mx' };\nconst GEO     = { 'es':'ES','de':'DE','fr':'FR','it':'IT','co.uk':'GB','com':'US','ca':'CA','mx':'MX' };\n\nconst dom  = DOMAINS[mp] || 'amazon.es';\nconst geo  = GEO[mp]     || 'ES';\n\nconst authHeader = 'Basic ' + Buffer.from(key + ':').toString('base64');\nconst seen = new Set();\nconst out  = [];\n\nfor (const kw of kwds) {\n  if (out.length >= maxTotal) break;\n  const searchUrl = `https://www.${dom}/s?k=${encodeURIComponent(kw)}`;\n  console.log(`[ASIN] kw=\"${kw}\"  url=${searchUrl}  collected=${out.length}/${maxTotal}`);\n\n  let foundAsins = [];\n\n  // ── Primary: productList ──\n  try {\n    const resp = await this.helpers.httpRequest({\n      method: 'POST', url: 'https://api.zyte.com/v1/extract',\n      headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },\n      body: JSON.stringify({ url: searchUrl, productList: true, geolocation: geo }),\n    });\n    const pl       = resp.productList;\n    const products = Array.isArray(pl) ? pl\n                   : Array.isArray(pl?.products) ? pl.products\n                   : Array.isArray(pl?.items)    ? pl.items\n                   : [];\n    console.log(`[ASIN] productList: ${products.length} products`);\n    for (const p of products) {\n      // Try structured ASIN field first\n      if (p.asin && /^[A-Z0-9]{10}$/.test(p.asin)) { foundAsins.push(p.asin); continue; }\n      // Extract from URL — /dp/ASIN or /gp/product/ASIN\n      const urls = [p.url, p.canonicalUrl, p.productUrl].filter(Boolean);\n      for (const u of urls) {\n        const m = u.match(/\\/(?:dp|gp\\/product)\\/([A-Z0-9]{10})/);\n        if (m) { foundAsins.push(m[1]); break; }\n      }\n    }\n    foundAsins = [...new Set(foundAsins)];\n    console.log(`[ASIN] productList → ${foundAsins.length} ASINs`);\n  } catch (e) { console.warn(`[ASIN] productList failed: ${e.message}`); }\n\n  // ── Fallback: browserHtml ──\n  if (foundAsins.length === 0) {\n    console.log(`[ASIN] falling back to browserHtml for \"${kw}\"`);\n    try {\n      const resp = await this.helpers.httpRequest({\n        method: 'POST', url: 'https://api.zyte.com/v1/extract',\n        headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },\n        body: JSON.stringify({ url: searchUrl, browserHtml: true, geolocation: geo }),\n      });\n      const html = resp.browserHtml || '';\n      console.log(`[ASIN] browserHtml length=${html.length}`);\n      const s1 = [...html.matchAll(/data-asin=\"([A-Z0-9]{10})\"/g)].map(m => m[1]);\n      const s2 = [...html.matchAll(/\\/(?:dp|gp\\/product)\\/([A-Z0-9]{10})/g)].map(m => m[1]);\n      const s3 = [...html.matchAll(/\"asin\"\\s*:\\s*\"([A-Z0-9]{10})\"/g)].map(m => m[1]);\n      foundAsins = [...new Set([...s1, ...s2, ...s3])];\n      console.log(`[ASIN] browserHtml → s1=${s1.length} s2=${s2.length} s3=${s3.length} unique=${foundAsins.length}`);\n    } catch (e) { console.error(`[ASIN] browserHtml failed: ${e.message}`); }\n  }\n\n  let cnt = 0;\n  for (const asin of foundAsins) {\n    if (out.length >= maxTotal) break;\n    if (seen.has(asin)) continue;\n    seen.add(asin);\n    out.push({ asin, keyword: kw, marketplace: mp, scraperUrl: cfg.scraperUrl, scraperApiKey: cfg.scraperApiKey, chatId: cfg.chatId });\n    cnt++;\n  }\n  console.log(`[ASIN] +${cnt} from \"${kw}\"  total=${out.length}/${maxTotal}`);\n}\n\nconsole.log(`[ASIN] DONE — ${out.length} ASINs`);\n\n// ── CRITICAL: Always return ≥1 item so downstream nodes execute ──\n// When 0 ASINs found, return a sentinel so the pipeline can notify via Telegram.\nif (out.length === 0) {\n  console.warn('[ASIN] 0 ASINs found — returning sentinel for Telegram error notification');\n  return [{ json: {\n    __noAsins:    true,\n    chatId:       cfg.chatId,\n    keywords:     kwds.join(', '),\n    marketplace:  mp,\n    scraperUrl:   cfg.scraperUrl,\n    scraperApiKey: cfg.scraperApiKey,\n  }}];\n}\n\nreturn out.map(r => ({ json: r }));",
         "mode": "runOnceForAllItems"
       },
-      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560004",
-      "name": "2 — Filter Amazon-sold (Scrape.do PDP Plugin)",
+      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560003",
+      "name": "1 — Collect ASINs (Zyte)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [960, 300]
     },
     {
       "parameters": {
-        "jsCode": "// ── Step 3: Scrape full seller info via local custom scraper ─────────────────────────\n// POST {scraperUrl}/scrape-from-asins — batches up to 50 ASINs per call.\n// Returns: seller_id, business_name, VAT number, email, phone, address.\n// NOTE: scraperUrl must be reachable from where n8n runs (e.g. http://localhost:8080).\nconst items = $input.all();\nif (!items.length) { console.log('[SCRAPER] No ASINs to scrape'); return []; }\n\nconst BATCH_SIZE = 50;\n\n// Group by marketplace\nconst byMp = {};\nfor (const it of items) {\n  const { asin, seller_name, marketplace: mp, scraperUrl, scraperApiKey } = it.json;\n  if (!byMp[mp]) byMp[mp] = { mp, scraperUrl, scraperApiKey, asins: [] };\n  byMp[mp].asins.push({ asin, category: seller_name || '', category_path: '' });\n}\n\nconst allResults = [];\n\nfor (const [mpKey, grp] of Object.entries(byMp)) {\n  const { asins, scraperUrl, scraperApiKey } = grp;\n  const totalBatches = Math.ceil(asins.length / BATCH_SIZE);\n\n  for (let i = 0; i < asins.length; i += BATCH_SIZE) {\n    const batch     = asins.slice(i, i + BATCH_SIZE);\n    const batchNum  = Math.floor(i / BATCH_SIZE) + 1;\n\n    console.log(`[SCRAPER] ${mpKey} batch ${batchNum}/${totalBatches} — ${batch.length} ASINs`);\n    console.log(`[SCRAPER] ASINs: ${batch.map(a => a.asin).join(', ')}`);\n\n    try {\n      let resp = await this.helpers.httpRequest({\n        method:  'POST',\n        url:     `${scraperUrl}/scrape-from-asins`,\n        headers: { 'x-api-key': scraperApiKey, 'Content-Type': 'application/json' },\n        body:    JSON.stringify({ asins: batch, marketplace: mpKey }),\n        timeout: 1800000,\n      });\n      if (typeof resp === 'string') resp = JSON.parse(resp);\n\n      const results = resp.results || [];\n      const ok = results.filter(r => r.status === 'success').length;\n      console.log(`[SCRAPER] batch ${batchNum}: ${ok}/${results.length} success`);\n\n      for (const r of results) {\n        allResults.push({\n          json: {\n            asin:           r.asin           || '',\n            seller_id:      r.seller_id      || '',\n            marketplace:    r.marketplace    || mpKey,\n            status:         r.status         || '',\n            business_name:  r.business_name  || '',\n            email:          r.email          || '',\n            phone:          r.phone          || '',\n            vat_number:     r.vat_number     || '',\n            address:        r.address || r.raw_info || '',\n            storefront_url: r.storefront_url || '',\n            seller_rating:  r.rating         || '',\n            category:       r.category       || '',\n            error:          r.error          || '',\n          },\n        });\n      }\n    } catch (e) {\n      console.error(`[SCRAPER] ${mpKey} batch ${batchNum} failed: ${e.message}`);\n      for (const a of batch) {\n        allResults.push({ json: { asin: a.asin, marketplace: mpKey, status: 'error', error: e.message } });\n      }\n    }\n  }\n}\n\nconsole.log(`[SCRAPER] Total results: ${allResults.length}`);\nreturn allResults;",
+        "jsCode": "// Packs ASINs into batches of 50 for the scraper.\n// Handles the __noAsins sentinel from Collect ASINs:\n//   → passes through an empty-asins body so the HTTP Request still fires\n//   → scraper returns {results:[]} for empty asins (no 400 error)\n//   → Parse Response detects __noAsins and sends a Telegram error message.\n\nconst items = $input.all();\n\n// ── Sentinel: Collect ASINs found nothing ────────────────────────────────────\nif (items.length === 1 && items[0].json.__noAsins) {\n  const info = items[0].json;\n  console.log(`[BATCH] No ASINs — passing sentinel through`);\n  return [{ json: {\n    scrapeBody:    { asins: [], marketplace: info.marketplace || 'es' },\n    scraperUrl:    info.scraperUrl    || 'http://127.0.0.1:8080',\n    scraperApiKey: info.scraperApiKey || '',\n    chatId:        info.chatId        || '',\n    marketplace:   info.marketplace   || 'es',\n    batchIndex:    0,\n    totalAsins:    0,\n    __noAsins:     true,\n    __keywords:    info.keywords      || '',\n  }}];\n}\n\nconst BATCH_SIZE = 50;\nconst first      = items[0].json;\nconst mp         = first.marketplace   || 'es';\nconst scraperUrl = first.scraperUrl    || 'http://127.0.0.1:8080';\nconst scraperKey = first.scraperApiKey || '';\nconst chatId     = first.chatId        || '';\n\nconsole.log(`[BATCH] ${items.length} ASINs → marketplace=${mp}`);\n\nconst allAsins = items.map(it => ({\n  asin:          it.json.asin,\n  category:      it.json.keyword || '',\n  category_path: '',\n}));\n\nconst batches = [];\nfor (let i = 0; i < allAsins.length; i += BATCH_SIZE) {\n  const batch = allAsins.slice(i, i + BATCH_SIZE);\n  batches.push({ json: {\n    scrapeBody:    { asins: batch, marketplace: mp },\n    scraperUrl,\n    scraperApiKey: scraperKey,\n    chatId,\n    marketplace:   mp,\n    batchIndex:    batches.length,\n    totalAsins:    items.length,\n    __noAsins:     false,\n  }});\n}\n\nconsole.log(`[BATCH] ${batches.length} batches queued`);\nreturn batches;",
         "mode": "runOnceForAllItems"
       },
-      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560005",
-      "name": "3 — Scrape Seller Info (Custom Local API)",
+      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560008",
+      "name": "2 — Batch ASINs",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [1200, 300]
     },
     {
       "parameters": {
-        "aggregate": "aggregateAllItemData",
-        "destinationFieldName": "results",
+        "method": "POST",
+        "url": "={{ $json.scraperUrl + '/scrape-from-asins' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key",     "value": "={{ $json.scraperApiKey }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.scrapeBody) }}",
+        "options": {
+          "timeout": 1800000
+        }
+      },
+      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560009",
+      "name": "3 — Call Local Scraper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Unpack scraper results → rows for Google Sheets.\n// __noAsins sentinel from Batch ASINs → return one error row for Telegram Reply.\n// NOTE: no __chatId in output — Telegram Reply reads chatId directly from\n//       Parse Telegram Message node, so we don't need to carry it through.\n\nconst items     = $input.all();\nconst scrapedAt = new Date().toISOString();\nconst allRows   = [];\n\n// ── __noAsins sentinel ───────────────────────────────────────────────────────\nconst batchMeta = $('2 — Batch ASINs').first().json;\nif (batchMeta.__noAsins) {\n  const keywords = batchMeta.__keywords || 'unknown';\n  const mp       = batchMeta.marketplace || '';\n  console.warn(`[PARSE] 0 ASINs found for: ${keywords}`);\n  return [{ json: {\n    'Status':      'no_asins_found',\n    'Keyword':     keywords,\n    'Marketplace': mp,\n    'Error':       `No products found on Amazon.${mp} for: \"${keywords}\". Try different keywords.`,\n    'Scraped At':  scrapedAt,\n    '__noAsins':   true,\n  }}];\n}\n\n// ── Normal path ──────────────────────────────────────────────────────────────\nconst mp = batchMeta.marketplace || '';\n\nfor (const it of items) {\n  let raw = it.json;\n\n  if (typeof raw?.body === 'string') {\n    try { raw = JSON.parse(raw.body); } catch(e) { console.error('[PARSE] body parse failed:', e.message); }\n  } else if (typeof raw?.data === 'string') {\n    try { raw = JSON.parse(raw.data); } catch(e) { console.error('[PARSE] data parse failed:', e.message); }\n  } else if (typeof raw === 'string') {\n    try { raw = JSON.parse(raw); } catch(e) { console.error('[PARSE] root parse failed:', e.message); }\n  }\n\n  console.log(`[PARSE] status=${raw?.status} total=${raw?.total} successful=${raw?.successful}`);\n  const results = Array.isArray(raw?.results) ? raw.results : [];\n  if (results.length > 0) console.log(`[PARSE] first: ${JSON.stringify(results[0])}`);\n\n  for (const r of results) {\n    allRows.push({ json: {\n      'ASIN':             r.asin            || '',\n      'Keyword':          r.category        || '',\n      'Marketplace':      r.marketplace     || mp,\n      'Status':           r.status          || '',\n      'Business Name':    r.business_name   || '',\n      'Email':            r.email           || '',\n      'Phone':            r.phone           || '',\n      'VAT Number':       r.vat_number      || '',\n      'Business Address': r.address         || '',\n      'Seller ID':        r.seller_id       || '',\n      'Storefront URL':   r.storefront_url  || '',\n      'Seller Rating':    r.rating          || '',\n      'Error':            r.error           || '',\n      'Scraped At':       scrapedAt,\n    }});\n  }\n\n  if (!results.length && it.json?.error) {\n    allRows.push({ json: { 'Status': 'error', 'Error': JSON.stringify(it.json), 'Scraped At': scrapedAt } });\n  }\n}\n\nconsole.log(`[PARSE] DONE — ${allRows.length} rows`);\nif (!allRows.length) {\n  allRows.push({ json: { 'Status': 'no_results', 'Error': 'Scraper returned 0 results', 'Scraped At': scrapedAt } });\n}\nreturn allRows;",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560010",
+      "name": "4 — Parse Scraper Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1--2SWzlo9VZ1kZ3NIJ7BX0U0tCV0SsiGkJm4xXHugKQ",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "id"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            { "id": "ASIN",             "displayName": "ASIN",             "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true,  "removed": false },
+            { "id": "Keyword",          "displayName": "Keyword",          "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Marketplace",      "displayName": "Marketplace",      "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Status",           "displayName": "Status",           "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Business Name",    "displayName": "Business Name",    "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Email",            "displayName": "Email",            "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Phone",            "displayName": "Phone",            "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "VAT Number",       "displayName": "VAT Number",       "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Business Address", "displayName": "Business Address", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Seller ID",        "displayName": "Seller ID",        "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Storefront URL",   "displayName": "Storefront URL",   "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Seller Rating",    "displayName": "Seller Rating",    "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Error",            "displayName": "Error",            "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false },
+            { "id": "Scraped At",       "displayName": "Scraped At",       "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false, "removed": false }
+          ]
+        },
         "options": {}
       },
-      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560006",
-      "name": "Aggregate Final Results",
-      "type": "n8n-nodes-base.aggregate",
-      "typeVersion": 1,
-      "position": [1440, 300]
+      "id": "bb9f1234-cc56-7890-de12-ff3456789012",
+      "name": "Save to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1920, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collapse all per-ASIN rows into ONE summary item for a single Telegram message.\nconst items = $input.all();\n\nif (items.length === 1 && items[0].json.__noAsins) {\n  return [{ json: {\n    __noAsins:   true,\n    keyword:     items[0].json.Keyword     || 'unknown',\n    marketplace: items[0].json.Marketplace || '',\n  }}];\n}\n\nconst total   = items.length;\nconst success = items.filter(r => r.json.Status === 'success').length;\nconst sold    = items.filter(r => r.json.Status === 'amazon_sold').length;\nconst errors  = items.filter(r => r.json.Status === 'error').length;\nconst mp      = items[0]?.json.Marketplace || '';\nconst kw      = items[0]?.json.Keyword     || '';\n\nreturn [{ json: { total, success, sold, errors, mp, kw, __noAsins: false } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560011",
+      "name": "5 — Summarize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2160, 300]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Parse Telegram Message').first().json.chatId }}",
+        "text": "={{ $json.__noAsins\n  ? `❌ No products found\\n\\nKeyword: \"${$json.keyword}\"\\nMarketplace: amazon.${$json.marketplace}\\n\\nTry different keywords.`\n  : `✅ Done!\\n\\nKeyword: ${$json.kw}\\nMarketplace: amazon.${$json.mp}\\nASINs processed: ${$json.total}\\nSuccess: ${$json.success}\\nAmazon-sold (skipped): ${$json.sold}\\nFailed: ${$json.errors}\\n\\nSaved to Google Sheets ✅` }}",
+        "additionalFields": {}
+      },
+      "id": "a1b2c3d4-e5f6-7890-ab12-ef1234560007",
+      "name": "Telegram Reply",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2400, 300],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
     }
   ],
   "connections": {
-    "Start": {
-      "main": [
-        [{ "node": "Config", "type": "main", "index": 0 }]
-      ]
+    "Telegram Trigger": {
+      "main": [[ { "node": "Parse Telegram Message", "type": "main", "index": 0 } ]]
+    },
+    "Parse Telegram Message": {
+      "main": [[ { "node": "Config", "type": "main", "index": 0 } ]]
     },
     "Config": {
-      "main": [
-        [{ "node": "1 — Collect ASINs (Scrape.do Search)", "type": "main", "index": 0 }]
-      ]
+      "main": [[ { "node": "1 — Collect ASINs (Zyte)", "type": "main", "index": 0 } ]]
     },
-    "1 — Collect ASINs (Scrape.do Search)": {
-      "main": [
-        [{ "node": "2 — Filter Amazon-sold (Scrape.do PDP Plugin)", "type": "main", "index": 0 }]
-      ]
+    "1 — Collect ASINs (Zyte)": {
+      "main": [[ { "node": "2 — Batch ASINs", "type": "main", "index": 0 } ]]
     },
-    "2 — Filter Amazon-sold (Scrape.do PDP Plugin)": {
-      "main": [
-        [{ "node": "3 — Scrape Seller Info (Custom Local API)", "type": "main", "index": 0 }]
-      ]
+    "2 — Batch ASINs": {
+      "main": [[ { "node": "3 — Call Local Scraper", "type": "main", "index": 0 } ]]
     },
-    "3 — Scrape Seller Info (Custom Local API)": {
-      "main": [
-        [{ "node": "Aggregate Final Results", "type": "main", "index": 0 }]
-      ]
+    "3 — Call Local Scraper": {
+      "main": [[ { "node": "4 — Parse Scraper Response", "type": "main", "index": 0 } ]]
+    },
+    "4 — Parse Scraper Response": {
+      "main": [[ { "node": "Save to Google Sheets", "type": "main", "index": 0 } ]]
+    },
+    "Save to Google Sheets": {
+      "main": [[ { "node": "5 — Summarize", "type": "main", "index": 0 } ]]
+    },
+    "5 — Summarize": {
+      "main": [[ { "node": "Telegram Reply", "type": "main", "index": 0 } ]]
     }
   },
   "active": false,
-  "settings": {
-    "executionOrder": "v1"
-  },
-  "id": "amazon-scrapedo-seller-workflow-v1",
-  "meta": {
-    "instanceId": "local"
-  }
+  "settings": { "executionOrder": "v1" },
+  "id": "amazon-zyte-seller-workflow-v1",
+  "meta": { "instanceId": "local" }
 }

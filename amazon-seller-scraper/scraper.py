@@ -426,19 +426,23 @@ def parse_seller_info(raw_text: str) -> dict:
         "email": None,
     }
 
-    # VAT / Tax ID — covers all EU marketplace languages
+    # VAT / Tax ID — covers all EU marketplace languages + Chinese OSS registrations
     vat_patterns = [
-        r'UStID(?:Nr\.?)?[:\s]*([A-Z]{0,2}[A-Z0-9]{8,15})',         # DE: UStID: DE454526764
-        r'(?:Número de )?IVA[:\s]*([A-Z0-9]{7,15})',                  # ES/IT
-        r'Partita\s+IVA[:\s]*([IT0-9]{10,13})',                       # IT: Partita IVA
-        r'P\.?\s*IVA[:\s]*([0-9]{10,13})',                            # IT short form
-        r'(?:Numéro de )?TVA[:\s]*([A-Z]{0,2}[A-Z0-9]{8,15})',       # FR
-        r'VAT(?:\s+Number)?[:\s#]*([A-Z]{2}[A-Z0-9]{5,15})',         # EN: VAT / VAT Number
-        r'Tax ID[:\s]*([A-Z0-9\-]{8,20})',
+        r'UStID(?:Nr\.?)?[:\s]*([A-Z]{0,2}[A-Z0-9]{8,15})',          # DE: UStID: DE454526764
+        r'(?:N[uú]mero\s+de\s+)?IVA[:\s]*([A-Z0-9]{7,15})',          # ES/IT (Número de IVA / IVA:)
+        r'Partita\s+IVA[:\s]*([IT0-9]{10,13})',                        # IT: Partita IVA
+        r'P\.?\s*IVA[:\s]*([0-9]{10,13})',                             # IT short form
+        r'(?:Num[eé]ro\s+de\s+)?TVA[:\s]*([A-Z]{0,2}[A-Z0-9]{8,15})',# FR
+        r'VAT(?:\s+(?:Registration\s+)?Number)?[:\s#]*([A-Z]{2}[A-Z0-9]{5,15})',  # EN
+        r'Tax(?:\s+(?:ID|Number|Reg))?[:\s]*([A-Z0-9\-]{8,20})',
         r'NIF[:\s]*([A-Z0-9]{8,12})',
         r'CIF[:\s]*([A-Z][0-9A-Z]{7,10})',
-        r'Steuer[^\n:]*[:\s]*([0-9/]{8,15})',                         # DE: Steuernummer
-        r'Trade Register Number[:\s]*([A-Z0-9\-\/]{6,20})',
+        r'Steuer[^\n:]*[:\s]*([0-9/]{8,15})',                          # DE: Steuernummer
+        r'Trade\s+Register(?:\s+Number)?[:\s]*([A-Z0-9\-\/]{6,20})',
+        r'Company\s+(?:Number|Reg\.?)[:\s]*([A-Z0-9\-]{6,15})',        # UK Companies House
+        r'BTW[:\s]*([A-Z]{2}[A-Z0-9]{7,15})',                          # NL/BE VAT
+        r'CVR[:\s]*(\d{8})',                                             # DK company number
+        r'((?:ES|DE|FR|IT|GB|NL|BE|PL|SE|AT|CZ|PT|RO|HU|HR)[0-9]{8,12})(?=[\s,\n]|$)',  # bare EU VAT code
     ]
     for pattern in vat_patterns:
         match = re.search(pattern, raw_text, re.IGNORECASE)
@@ -962,7 +966,25 @@ async def scrape_seller_page(
         if raw_text:
             print(f"  [DEBUG] raw_info preview: {raw_text[:200]!r}")
 
+        # ── Parse VAT/phone/email from selected section first ─────────────────
         parsed = parse_seller_info(raw_text)
+
+        # ── Fallback: scan full body text (up to 20 000 chars) ───────────────
+        # Amazon ES puts business info (VAT, address) at the BOTTOM of seller
+        # pages — often past the first 5 000 chars of "About seller" text.
+        # We always do a second pass on the full body to catch it.
+        if not all(parsed.values()):
+            body_el2 = await page.query_selector("body")
+            if body_el2:
+                full_body = ((await body_el2.inner_text()) or "").strip()[:20000]
+                if len(full_body) > len(raw_text):
+                    parsed2 = parse_seller_info(full_body)
+                    # Merge: prefer the specific-section value if already found
+                    for k in ("vat_number", "phone", "email"):
+                        if not parsed.get(k) and parsed2.get(k):
+                            parsed[k] = parsed2[k]
+                            print(f"  [DEBUG] Full-body fallback found {k}: {parsed2[k]!r}")
+
         data.update(parsed)
         print(f"  [DEBUG] Parsed → VAT: {parsed.get('vat_number')!r}, phone: {parsed.get('phone')!r}, email: {parsed.get('email')!r}")
 

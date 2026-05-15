@@ -191,7 +191,8 @@ async def scrape_from_asins(
     check_marketplace(request.marketplace)
 
     if not request.asins:
-        raise HTTPException(status_code=400, detail="asins cannot be empty")
+        # Empty asins = 0-ASIN run (Zyte found nothing) — return clean empty result instead of 400
+        return ScrapeResponse(status="complete", total=0, successful=0, failed=0, results=[])
     if len(request.asins) > 50:
         raise HTTPException(status_code=400, detail="Max 50 ASINs per request")
 

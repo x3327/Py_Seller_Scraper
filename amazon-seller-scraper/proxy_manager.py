@@ -1,109 +1,89 @@
 # proxy_manager.py
+# Webshare residential proxies — 20,000 threads
+# Format: p.webshare.io:80:edonqeko-{N}:kxvif6tazp3e  (N = 1..20000)
 
 import random
 import time
 
 # ─────────────────────────────────────────
-# Your Webshare Residential Proxies
-# Format: IP:PORT:USERNAME:PASSWORD
+# Config
 # ─────────────────────────────────────────
-RAW_PROXIES = [
-    "31.59.20.176:6754:edonqeko:kxvif6tazp3e",
-    "92.113.242.158:6742:edonqeko:kxvif6tazp3e",
-    "198.23.239.134:6540:edonqeko:kxvif6tazp3e",
-    "45.38.107.97:6014:edonqeko:kxvif6tazp3e",
-    "107.172.163.27:6543:edonqeko:kxvif6tazp3e",
-    "216.10.27.159:6837:edonqeko:kxvif6tazp3e",
-    "142.111.67.146:5611:edonqeko:kxvif6tazp3e",
-    "191.96.254.138:6185:edonqeko:kxvif6tazp3e",
-    "31.58.9.4:6077:edonqeko:kxvif6tazp3e",
-    "23.229.19.94:8689:edonqeko:kxvif6tazp3e",
-]
+PROXY_HOST     = "p.webshare.io"
+PROXY_PORT     = 80
+PROXY_PASSWORD = "kxvif6tazp3e"
+PROXY_USER_PREFIX = "edonqeko"
+PROXY_COUNT    = 20000   # total threads available
+
+# Cooldown: skip a thread for this many seconds after it gets blocked
+PROXY_COOLDOWN_SECS = 300
+
+# ─────────────────────────────────────────
+# Failed-thread tracking
+# ─────────────────────────────────────────
+_failed_at: dict[int, float] = {}   # thread_index -> unix timestamp of failure
+_last_used:  int = -1
 
 
-def parse_proxies(raw_list: list[str]) -> list[dict]:
-    """Parse raw proxy strings into structured dicts."""
-    parsed = []
-    for proxy in raw_list:
-        parts = proxy.split(":")
-        parsed.append({
-            "server": f"http://{parts[0]}:{parts[1]}",
-            "username": parts[2],
-            "password": parts[3],
-        })
-    return parsed
-
-
-PROXIES = parse_proxies(RAW_PROXIES)
-
-# Track usage count per proxy to distribute load evenly
-_usage_count: dict[int, int] = {i: 0 for i in range(len(PROXIES))}
-_last_used_index: int = -1
-
-# Failed proxy tracking — skip proxies that recently returned bot-detection pages
-_failed_at: dict[int, float] = {}  # index -> unix timestamp of last failure
-PROXY_COOLDOWN_SECS = 300  # 5 minutes before a failed proxy is tried again
-
-
-def mark_proxy_failed(proxy_dict: dict) -> None:
-    """
-    Call this when a proxy returns a bot-detection/blocked page.
-    The proxy will be skipped for PROXY_COOLDOWN_SECS seconds.
-    """
-    for i, p in enumerate(PROXIES):
-        if p["server"] == proxy_dict.get("server", ""):
-            _failed_at[i] = time.time()
-            print(f"  [PROXY] Proxy #{i} marked failed — cooldown {PROXY_COOLDOWN_SECS}s")
-            break
+def _thread_username(n: int) -> str:
+    """Return Webshare username for thread N (1-based)."""
+    return f"{PROXY_USER_PREFIX}-{n}"
 
 
 def get_proxy() -> dict:
     """
-    Returns a proxy using weighted rotation:
-    - Skip recently failed proxies (cooldown window)
-    - Prefer least-used proxy
-    - Never use same proxy twice in a row
+    Pick a random Webshare thread.
+    - Avoids the last-used thread (reduce fingerprint correlation).
+    - Avoids threads that recently triggered a block (cooldown window).
+    - Falls back to any thread if all are in cooldown.
     """
-    global _last_used_index
+    global _last_used
 
     now = time.time()
 
-    # Exclude recently failed and last-used proxy
-    available = [
-        i for i in range(len(PROXIES))
-        if now - _failed_at.get(i, 0) > PROXY_COOLDOWN_SECS and i != _last_used_index
-    ]
+    # Build a candidate pool: not failed-recently, not the very last used
+    def is_available(n: int) -> bool:
+        return (
+            n != _last_used
+            and now - _failed_at.get(n, 0) > PROXY_COOLDOWN_SECS
+        )
 
-    # If all proxies are in cooldown, ignore cooldown (must use something)
-    if not available:
-        available = [i for i in range(len(PROXIES)) if i != _last_used_index]
+    # Sample 100 random threads to check (cheap; avoids scanning all 20k)
+    sample = random.sample(range(1, PROXY_COUNT + 1), min(100, PROXY_COUNT))
+    candidates = [n for n in sample if is_available(n)]
 
-    # If still empty (single proxy), use any
-    if not available:
-        available = list(range(len(PROXIES)))
+    if not candidates:
+        # All sampled threads in cooldown — just pick any random thread
+        candidates = [n for n in sample if n != _last_used] or sample
 
-    # Sort by usage count (least used first) and pick randomly from top 4
-    sorted_by_use = sorted(available, key=lambda i: _usage_count[i])
-    candidates = sorted_by_use[:4]
+    chosen = random.choice(candidates)
+    _last_used = chosen
 
-    chosen_index = random.choice(candidates)
-    _usage_count[chosen_index] += 1
-    _last_used_index = chosen_index
+    return {
+        "server":   f"http://{PROXY_HOST}:{PROXY_PORT}",
+        "username": _thread_username(chosen),
+        "password": PROXY_PASSWORD,
+        "_thread":  chosen,   # carried for mark_proxy_failed
+    }
 
-    return PROXIES[chosen_index]
+
+def mark_proxy_failed(proxy_dict: dict) -> None:
+    """Call when a proxy returns a bot-detection / blocked page."""
+    thread = proxy_dict.get("_thread")
+    if thread is not None:
+        _failed_at[thread] = time.time()
+        print(f"  [PROXY] Thread #{thread} marked failed — cooldown {PROXY_COOLDOWN_SECS}s")
 
 
 def get_proxy_for_playwright() -> dict:
     """Returns proxy formatted for Playwright browser context."""
     proxy = get_proxy()
     return {
-        "server": proxy["server"],
+        "server":   proxy["server"],
         "username": proxy["username"],
         "password": proxy["password"],
     }
 
 
 def reset_usage_counts() -> None:
-    """Reset usage counts — call this daily if running long-term."""
-    global _usage_count
-    _usage_count = {i: 0 for i in range(len(PROXIES))}
+    """No-op kept for API compatibility."""
+    pass
